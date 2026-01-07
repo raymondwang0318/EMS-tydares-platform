@@ -1,0 +1,17 @@
+# OS
+Thumbs.db
+.DS_Store
+
+# Editors
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+
+# Secrets (keep local)
+.env
+.env.*
+
+# Archives
+*.zip

@@ -1,0 +1,12 @@
+-- EMS-tydares-central / 02-data-ingest
+-- ORDS endpoint scaffold: /ingest/media
+-- Placeholder for ORDS module + handler.
+
+-- Headers:
+-- - X-Site-Id
+-- - X-Edge-Id
+-- - X-Idempotency-Key
+--
+-- Suggested:
+-- - multipart/form-data (Phase 2)
+-- - or metadata JSON + (optional) presigned upload flow
