@@ -6,6 +6,17 @@
 本邊界在「Edge 與 Central 硬體尚未到位」階段即先行鎖定，
 屬於設計基準文件（Design Baseline）。
 
+## Ingest v1 封版宣告
+
+系統尚未上線，因此允許破壞性變更；但 ingest 架構已封版為 v1，後續不得任意漂移：
+
+- v1 唯一入口：`POST /ingest/{device_id}`（舊入口視為 REMOVED）
+- 不允許多入口並存
+- HTTP shell（ORDS handler）不得實作商業邏輯
+- ingest 語義由 DB entrypoint 負責：`ems_ingest_entrypoint.handle_ingest`
+
+任何 ingest 行為變更，必須同時影響 Edge 與 Central 兩端的契約與文件。
+
 ---
 
 ## 一、系統角色總覽
@@ -47,7 +58,7 @@
 - 產生 **idempotency key**
 - 本地 SQLite queue（斷線不死）
 - Retry / backoff（避免狂轟 Central）
-- 將資料以 HTTP POST 傳送至 Central ingest
+- 將資料以 HTTP POST 傳送至 Central ingest（v1：`POST /ingest/{device_id}`）
 - 僅依 Central ACK（stored / duplicate / rejected）決定 queue 行為
 
 ### Edge **嚴禁負責**
@@ -65,8 +76,9 @@
 ## 三、Central Ingest（資料接收層）的責任
 
 ### Central Ingest **必須負責**
-- 提供穩定的 HTTP 接收端點（ORDS）
-- 驗證基本 header（X-Site-Id / X-Edge-Id / X-Idempotency-Key）
+- 提供穩定的 HTTP 接收端點（ORDS；thin shell）
+- 讀取 `device_id` path parameter 作為 routing/bucket key
+- 驗證基本 header（`X-Idempotency-Key` 建議；用於去重）
 - 依 idempotency key 去重
 - 將 payload 原樣寫入 ingest inbox（raw）
 - 回傳明確 ACK：

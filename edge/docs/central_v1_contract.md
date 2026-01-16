@@ -4,6 +4,13 @@
 
 本文件定義 Edge 對 Central ingest 的唯一合法呼叫方式與重試/退避行為。
 
+Normative references:
+- docs/platform/ingest_throttling.md (Appendix A)
+- docs/platform/ingest_http_flow.md
+- docs/platform/ingest_implementation_checklist.md
+
+任何 ingest 行為變更，必須同時更新 Edge 與 Central（契約/文件/實作）。
+
 ## 1) 唯一入口（REMOVED 舊入口）
 
 - ✅ 唯一合法入口：`POST /ords/ems/ingest/{device_id}`

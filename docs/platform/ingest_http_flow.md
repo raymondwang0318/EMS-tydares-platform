@@ -3,9 +3,21 @@
 Status: Normative  
 Authority: Appendix A (Implementation Blueprint)
 
+## v1 Freeze
+
+This project is not yet live and allows breaking changes.
+However, ingest is frozen as v1 and must not drift:
+
+- No backwards-compatibility obligations
+- No parallel ingest entrypoints
+- ORDS handlers must remain thin HTTP shells (no business logic)
+- All semantics live in `ems_ingest_entrypoint.handle_ingest`
+
+Any ingest behavior change MUST update both Edge and Central contract documents.
+
 ## Purpose
 
-Define the mandatory HTTP ingress flow for `/ingest/*`.
+Define the mandatory HTTP ingress flow for v1 `POST /ingest/{device_id}`.
 All implementations (ORDS, API Gateway, app server) MUST follow this order and semantics.
 
 This document defines what must happen, not how it is implemented.

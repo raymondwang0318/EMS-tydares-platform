@@ -11,6 +11,7 @@ BEGIN
   -- - docs/platform/ingest_http_flow.md
   -- - docs/platform/ingest_implementation_checklist.md
   -- This handler MUST NOT implement business logic.
+  -- v1 freeze: do not add parallel endpoints; do not add compatibility shims here.
 
   ORDS.define_template(
     p_module_name => 'ingest',

@@ -2,6 +2,18 @@
 
 本專案為「tydares 農改場」EMS 平台總倉（Platform Repo），包含 Edge 邊緣收集站與 Central 中央平台的最小可運行架構。
 
+## Ingest v1 封版宣告（一次性定版）
+
+本專案目前仍處於設計與建置階段，尚未正式上線；因此本階段允許破壞性變更。
+但 **Central ingest 架構已封版為 v1**，後續不得任意漂移：
+
+- 不考慮舊架構相容（舊入口視為 REMOVED）
+- 不提供多入口並存（v1 唯一入口：`POST /ingest/{device_id}`）
+- ORDS handler 必須是 thin HTTP shell，不得實作商業邏輯
+- 所有 ingest 語義必須委派 DB entrypoint：`ems_ingest_entrypoint.handle_ingest`
+
+變更規則：任何 ingest 行為變更，必須同時更新 Edge 與 Central 契約與文件。
+
 ## 目標（目前階段）
 優先完成 **Edge MVP**，並同步完成 **Central Ingest 最小接收層**，以便在現場進行斷線/補送/去重的真實運行測試。
 

@@ -1,5 +1,12 @@
 # Ingest Implementation Checklist
 
+## v1 Freeze (Guardrails)
+
+- Ingest is frozen as v1 (breaking changes allowed, but drift is not)
+- No parallel ingest entrypoints are allowed
+- HTTP shells (ORDS handlers) MUST NOT implement business logic
+- Any ingest behavior change updates Edge + Central contracts and Appendix A first
+
 ## Purpose
 
 Prevent semantic drift from Appendix A and `ingest_http_flow.md`.
@@ -33,3 +40,4 @@ Prevent semantic drift from Appendix A and `ingest_http_flow.md`.
 - No hard-coded numeric thresholds outside constants
 - No logic added that is not described in Appendix A
 - Any semantic change updates Appendix A first
+- No new ingest endpoints (v1 only: `POST /ingest/{device_id}`)
