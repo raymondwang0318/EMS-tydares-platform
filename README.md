@@ -14,6 +14,8 @@
 
 變更規則：任何 ingest 行為變更，必須同時更新 Edge 與 Central 契約與文件。
 
+索引入口：`docs/platform/ingest_v1_index.md`
+
 ## 目標（目前階段）
 優先完成 **Edge MVP**，並同步完成 **Central Ingest 最小接收層**，以便在現場進行斷線/補送/去重的真實運行測試。
 
