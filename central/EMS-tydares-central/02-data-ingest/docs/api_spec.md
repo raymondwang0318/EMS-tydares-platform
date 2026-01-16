@@ -15,14 +15,14 @@ Source of truth：Platform repo 文件
 - `X-Idempotency-Key: <uuid-or-hash>`
 
 ### Path params
-- `device_id`：bucket key（建議與 body.device_id 一致）
+- `device_id`：bucket key（routing 唯一來源）
 
 ### Body（最小）
+v1 契約：request body **不得**承載 routing 語義（例如 `device_id`）。
 ```json
 {
   "ts": "2026-01-07T05:12:34+08:00",
   "type": "meter_reading",
-  "device_id": "gateway-01",
   "payload": {
     "meter_id": "AEM-01",
     "kwh": 1234.56,
@@ -34,6 +34,8 @@ Source of truth：Platform repo 文件
 ```
 
 ### Response（ACK 統一格式）
+
+v1 契約：成功回應以 `202 Accepted` 為主（非同步處理）；Edge **不得**假設 `200` 代表已處理完成。
 
 ✅ 成功（新寫入）
 ```json
@@ -72,4 +74,8 @@ Source of truth：Platform repo 文件
 
 ## 錯誤碼
 請見 `docs/api/error-codes.md`（platform repo）。
+
+## Edge contract notes
+- `503`/`429` 時必須遵守 `Retry-After`（秒），不得立刻重送
+- `202` 表示已接受（非同步），Edge 不得等待「處理完成」才視為成功
 

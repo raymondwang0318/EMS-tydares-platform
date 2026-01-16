@@ -17,13 +17,16 @@
    - `POST /ingest/{device_id}`（v1 唯一入口）
 
 5. 能收到 ACK 並正確處理
+   - `202`（Accepted, async）：視同成功（已被 Central 接受），可刪除 buffer
    - `stored`：標記 sent，可刪除 buffer
    - `duplicate`：視同成功（Central 已收件），可刪除 buffer
    - `rejected`：丟 dead-letter（不重試）
-   - `SERVER_ERROR` / `SERVICE_UNAVAILABLE` / `RATE_LIMIT`：退避重試
+   - `503 SERVICE_UNAVAILABLE` + `Retry-After`：全域過載，必須退避重試
+   - `429 RATE_LIMIT` + `Retry-After`：per-device 節流，必須退避重試
 
 ## DONE（可驗收）
 - 斷網 1 小時：資料仍持續入 buffer、程式不崩
 - 恢復網路：會自動補送，且不會造成重複資料（靠同一把 `X-Idempotency-Key`）
 - 重啟 Edge：buffer 不遺失，且仍可繼續補送
 - Central 回 `duplicate` 時，Edge 行為與 `stored` 相同
+- Edge 不得假設 `200` 代表已處理完成；成功判斷以 `202` 與回應 body 為主

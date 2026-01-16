@@ -11,15 +11,16 @@ Central 只做：接收、去重、回 ACK、存 raw。
 - `X-Idempotency-Key: <uuid-or-hash>`（強烈建議）
 
 ### Path params
-- `device_id`：bucket key（建議與 body.device_id 一致）
+- `device_id`：bucket key（routing 唯一來源）
 
 ### Body（最小）
+
+v1 契約：request body **不得**承載 routing 語義（例如 `device_id`）。
 
 ```json
 {
   "ts": "2026-01-07T05:12:34+08:00",
   "type": "meter_reading",
-  "device_id": "gateway-01",
   "payload": {
     "meter_id": "AEM-01",
     "kwh": 1234.56,
@@ -31,6 +32,8 @@ Central 只做：接收、去重、回 ACK、存 raw。
 ```
 
 ### Response（ACK 統一格式）
+
+v1 契約：成功回應以 `202 Accepted` 為主（非同步處理）；Edge **不得**假設 `200` 代表已處理完成。
 
 ✅ 成功（新寫入）
 
@@ -64,6 +67,12 @@ Central 只做：接收、去重、回 ACK、存 raw。
   "message": "missing field: ts"
 }
 ```
+
+### Retry / Backoff（Edge 必須遵守）
+
+- `503 SERVICE_UNAVAILABLE` + `Retry-After`：全域過載，**必須退避**（不得立刻重送）
+- `429 RATE_LIMIT` + `Retry-After`：per-device 節流，**必須退避**（不得立刻重送）
+- `202 Accepted`：已接受（非同步），Edge 可視為成功（同 stored/duplicate），以避免重送造成風暴
 
 ## Removed
 
