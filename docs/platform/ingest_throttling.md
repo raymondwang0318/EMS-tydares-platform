@@ -367,21 +367,22 @@ CREATE INDEX ix_ingest_inbox_processed_at ON ems_ingest_inbox(processed_at);
 
 CREATE OR REPLACE PACKAGE ems_ingest_constants AS
   -- ACK
-  ACK_PHASE_DEFAULT         CONSTANT VARCHAR2(32) := 'PHASE1_200';
+  ACK_HTTP_PHASE_200        CONSTANT PLS_INTEGER := 1;
+  ACK_HTTP_PHASE_202        CONSTANT PLS_INTEGER := 2;
 
   -- Retry-After（秒）
   RETRY_AFTER_MIN_SEC       CONSTANT PLS_INTEGER := 1;
   RETRY_AFTER_MAX_SEC       CONSTANT PLS_INTEGER := 30;
 
   -- Rate limit（token bucket）
-  RL_DEFAULT_CAPACITY       CONSTANT PLS_INTEGER := 10;
-  RL_DEFAULT_REFILL_PER_SEC CONSTANT NUMBER      := 1;
-  RL_COST_PER_REQUEST       CONSTANT PLS_INTEGER := 1;
+  RL_DEFAULT_CAPACITY       CONSTANT NUMBER      := 100;
+  RL_DEFAULT_REFILL_PER_SEC CONSTANT NUMBER      := 10;
+  RL_COST_PER_REQUEST       CONSTANT NUMBER      := 1;
 
   -- Global overload
-  OVERLOAD_BACKLOG_X        CONSTANT PLS_INTEGER := 100000;
-  OVERLOAD_LAG_MIN_Y        CONSTANT PLS_INTEGER := 30;
-  OVERLOAD_RATE_WINDOW_MIN  CONSTANT PLS_INTEGER := 5;
+  OVERLOAD_BACKLOG_X        CONSTANT NUMBER      := 1000;
+  OVERLOAD_LAG_MIN_Y        CONSTANT NUMBER      := 5;
+  OVERLOAD_RATE_WINDOW_MIN  CONSTANT NUMBER      := 1;
 
   -- Worker retry/backoff
   WORKER_ATTEMPTS_MAX       CONSTANT PLS_INTEGER := 10;
@@ -393,7 +394,7 @@ END ems_ingest_constants;
 -- 一致性目的：集中讀 config 的位置；常數仍由 ems_ingest_constants 保護上限/下限。
 
 CREATE OR REPLACE PACKAGE ems_ingest_settings AS
-  FUNCTION get_ack_http_phase RETURN VARCHAR2;
+  FUNCTION get_ack_http_phase RETURN PLS_INTEGER;
   PROCEDURE get_overload_thresholds(
     o_backlog_x       OUT PLS_INTEGER,
     o_lag_min_y       OUT PLS_INTEGER,
@@ -408,17 +409,20 @@ END ems_ingest_settings;
 /
 
 CREATE OR REPLACE PACKAGE BODY ems_ingest_settings AS
-  FUNCTION get_ack_http_phase RETURN VARCHAR2 IS
+  FUNCTION get_ack_http_phase RETURN PLS_INTEGER IS
     v VARCHAR2(256);
   BEGIN
     BEGIN
       SELECT config_value INTO v
         FROM ems_ingest_config
        WHERE config_key = 'ACK_HTTP_PHASE';
-      RETURN v;
+      RETURN CASE
+        WHEN v = 'PHASE2_202' THEN ems_ingest_constants.ACK_HTTP_PHASE_202
+        ELSE ems_ingest_constants.ACK_HTTP_PHASE_200
+      END;
     EXCEPTION
       WHEN NO_DATA_FOUND THEN
-        RETURN ems_ingest_constants.ACK_PHASE_DEFAULT;
+        RETURN ems_ingest_constants.ACK_HTTP_PHASE_200;
     END;
   END;
 
@@ -463,9 +467,9 @@ CREATE TABLE ems_ingest_config (
 -- config_value = 'PHASE1_200' 或 'PHASE2_202'
 
 -- 讀取方式（偽碼）：
--- SELECT config_value INTO v_ack_phase FROM ems_ingest_config WHERE config_key='ACK_HTTP_PHASE';
+-- v_ack_phase := ems_ingest_settings.get_ack_http_phase();  -- 回傳 ems_ingest_constants.ACK_HTTP_PHASE_200 / _202
 -- 成功（stored/duplicate）時：
---   IF v_ack_phase='PHASE1_200' THEN o_http_code := 200; ELSE o_http_code := 202; END IF;
+--   IF v_ack_phase = ems_ingest_constants.ACK_HTTP_PHASE_200 THEN o_http_code := 200; ELSE o_http_code := 202; END IF;
 -- 失敗（429/503/400/401/403...）維持既有 HTTP code。
 -- 重要：Edge 永遠以 body.status 判斷成功，不以 HTTP code。
 ```
@@ -697,7 +701,7 @@ BEGIN
   -- (F) 200 → 202 過渡期：成功一律看 body.status；HTTP code 由 phase 控制
   v_ack_phase := ems_ingest_settings.get_ack_http_phase();
 
-  IF v_ack_phase = 'PHASE1_200' THEN
+  IF v_ack_phase = ems_ingest_constants.ACK_HTTP_PHASE_200 THEN
     o_http_code := 200;
   ELSE
     o_http_code := 202;
