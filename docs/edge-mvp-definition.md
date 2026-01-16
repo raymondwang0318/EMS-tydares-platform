@@ -14,8 +14,7 @@
    - 能偵測 Central endpoint 是否可達（timeout/HTTP status）
 
 4. 能呼叫 Central API
-   - `POST /ingest/data`
-   -（Phase 2 才用到）`POST /ingest/media`
+   - `POST /ingest/{device_id}`（v1 唯一入口）
 
 5. 能收到 ACK 並正確處理
    - `stored`：標記 sent，可刪除 buffer

@@ -3,10 +3,10 @@ set -euo pipefail
 
 HOST="https://<host>"
 
-curl -X POST "$HOST/ords/ems/ingest/data" \
+DEVICE_ID="gateway-01"
+
+curl -X POST "$HOST/ords/ems/ingest/$DEVICE_ID" \
   -H "Content-Type: application/json" \
-  -H "X-Site-Id: tydares" \
-  -H "X-Edge-Id: edge-01" \
   -H "X-Idempotency-Key: test-uuid-001" \
   -d '{
     "ts": "2026-01-07T10:00:00+08:00",

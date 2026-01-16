@@ -38,7 +38,7 @@
 ```
 Edge (queue/batch/backoff)
         |
-        |  HTTP POST /ingest/data
+        |  HTTP POST /ingest/{device_id}
         v
 +---------------------+
 |  ORDS Ingest Layer  |  (水平擴展，多節點)
@@ -72,12 +72,12 @@ Edge (queue/batch/backoff)
 
 ## 2. Ingest 接收層行為設計
 
-本節定義 `/ingest/data`（及同型 endpoint）在風暴期間的具體行為。
+本節定義 `POST /ingest/{device_id}` 在風暴期間的具體行為（v1 唯一入口）。
 
 ### 2.1 最小處理原則（必須）
 Ingest 層只做以下事情：
 - 驗證必要 header：`X-Site-Id`、`X-Edge-Id`、`X-Idempotency-Key`
-- 解析 payload 的最小欄位以取得 `device_code`（`device_id`）與 `ts/type`（目前已在 `ems_ingest_pkg.ingest_data` 做）
+- 解析 payload 的最小欄位以取得 `device_code`（`device_id`）與 `ts/type`（由 `ems_ingest_entrypoint.handle_ingest` 之後續 store/validate 階段負責）
 - **執行 per-device rate limit**（見 2.2）
 - **執行 idempotency**（去重）
 - **將 raw payload 寫入 inbox**（staging）
@@ -143,9 +143,9 @@ Ingest 層只做以下事情：
 }
 ```
 
-> 相容性說明：現有文件與 `ems_ingest_pkg` 以 `200 stored/duplicate` 為基線；
-> 本 anti-storm 設計建議升級為 `202`（語意更精準）。若短期需相容，也可先維持 200，
-> 但 Edge 的行為應以 `status=stored|duplicate` 為準，而非僅看 HTTP code。
+> 相容性說明：舊 `/ingest/data` 規格曾以 `200 stored/duplicate` 為基線；
+> v1 定版後唯一入口為 `POST /ingest/{device_id}`，建議回 `202`（語意更精準）。
+> Edge 的成功判斷一律以 `status=stored|duplicate` 為準，而非僅看 HTTP code。
 
 #### 429 Too Many Requests（節流）
 當 Central 判定「此 `device_code` 超出允許速率」時回 `429`，並提供可機械判讀的退避資訊。
@@ -901,7 +901,7 @@ END;
   - Phase 1：維持 `200`（相容期），body 仍回 `status=stored|duplicate`
   - Phase 2：切換 `202`，body 欄位不變
 2. 新增 per-device rate limit 的資料表（例：`ems_ingest_rl_device`）
-3. 在 `ems_ingest_pkg.ingest_data` 的最前面插入 rate-limit 檢查（不足即回 429 + Retry-After）
+3. 在 v1 入口 `ems_ingest_entrypoint.handle_ingest` 的最前面插入 rate-limit 檢查（不足即回 429 + Retry-After）
 4. Inbox 增加狀態欄位（或新增工作表）
   - 支援 `process_status/attempts/next_attempt_at/last_error_*`
 5. 實作 worker job

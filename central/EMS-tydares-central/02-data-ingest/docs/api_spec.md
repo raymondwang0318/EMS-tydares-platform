@@ -6,13 +6,16 @@ Source of truth：Platform repo 文件
 
 本資料夾保留的是 Central 端落地時的參考版本（盡量與 platform docs 同步）。
 
-## POST /ingest/data
+## POST /ingest/{device_id}
+
+> DEPRECATED/REMOVED: `POST /ingest/data`（v1 不允許平行入口）
 
 ### Request headers（建議）
 - `Content-Type: application/json`
-- `X-Site-Id: tydares`
-- `X-Edge-Id: edge-01`
 - `X-Idempotency-Key: <uuid-or-hash>`
+
+### Path params
+- `device_id`：bucket key（建議與 body.device_id 一致）
 
 ### Body（最小）
 ```json
@@ -62,10 +65,10 @@ Source of truth：Platform repo 文件
 }
 ```
 
-## POST /ingest/media
-Phase 2 才會用到也行，但先保留規格。
-- 建議：`multipart/form-data`
-- 同樣支援 `X-Idempotency-Key`
+## Removed
+
+- `POST /ingest/data`：REMOVED（請改用 `POST /ingest/{device_id}`）
+- `POST /ingest/media`：REMOVED（v1 不提供平行 ingest 入口）
 
 ## 錯誤碼
 請見 `docs/api/error-codes.md`（platform repo）。

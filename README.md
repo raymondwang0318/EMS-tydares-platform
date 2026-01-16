@@ -29,10 +29,9 @@ ems-tydares-platform/
 - 可觀測（log/health）
 
 ### Phase 1.5：Central Ingest（接得住即可）
-- `/ingest/data` 接收 JSON
-- idempotency 去重
-- 回 ACK（stored/duplicate/rejected）
-- raw data 落地 `ingest_inbox`
+- **v1 唯一入口：**`/ingest/{device_id}` 接收 JSON
+- Anti‑Storm（429/503 + Retry-After）
+- raw data 落地 inbox（後續由 worker 非同步處理）
 
 ### Phase 2 以後（後續擴充）
 - EMS 業務計算（kwh/kw/報表/告警）
@@ -43,7 +42,7 @@ ems-tydares-platform/
 
 ## API 規格（最小）
 
-- 規格入口：`docs/api/ingest-data.md`
+- 規格入口：`docs/api/ingest-data.md`（v1：`POST /ingest/{device_id}`）
 - 錯誤碼：`docs/api/error-codes.md`
 
 ---

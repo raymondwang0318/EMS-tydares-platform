@@ -1,4 +1,10 @@
 BEGIN
+  ORDS.define_module(
+    p_module_name    => 'ingest',
+    p_base_path      => '/ingest/',
+    p_items_per_page => 0
+  );
+
   -- POST /ingest/{device_id}
   -- This handler is a thin HTTP shell. All ingest semantics are implemented in DB packages and defined by:
   -- - Appendix A (Normative)

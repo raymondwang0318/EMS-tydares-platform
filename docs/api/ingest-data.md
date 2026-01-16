@@ -1,14 +1,17 @@
-# Central Ingest API 最小規格（Phase 1.5）
+# Central Ingest API 最小規格（v1 定版）
 
 Central 只做：接收、去重、回 ACK、存 raw。
 
-## POST /ingest/data
+## POST /ingest/{device_id}
+
+> DEPRECATED/REMOVED: `POST /ingest/data`（v1 不允許平行入口）
 
 ### Request headers（建議）
 - `Content-Type: application/json`
-- `X-Site-Id: tydares`
-- `X-Edge-Id: edge-01`
 - `X-Idempotency-Key: <uuid-or-hash>`（強烈建議）
+
+### Path params
+- `device_id`：bucket key（建議與 body.device_id 一致）
 
 ### Body（最小）
 
@@ -62,10 +65,7 @@ Central 只做：接收、去重、回 ACK、存 raw。
 }
 ```
 
-## POST /ingest/media
+## Removed
 
-Phase 2 才會用到也行，但先留規格。
-
-建議做法：
-- `multipart/form-data`
-- 同樣支援 `X-Idempotency-Key`
+- `POST /ingest/data`：REMOVED（請改用 `POST /ingest/{device_id}`）
+- `POST /ingest/media`：REMOVED（v1 不提供平行 ingest 入口）
