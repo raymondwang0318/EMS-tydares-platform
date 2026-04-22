@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge } from 'antd';
-import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined } from '@ant-design/icons';
+import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag } from 'antd';
+import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { StatusTag } from '../components/common/StatusTag';
 import {
@@ -12,7 +12,14 @@ import {
   useResyncEdge,
   type Edge,
 } from '../hooks/useEdges';
+import {
+  useEdgeDevices,
+  useRenameDevice,
+  useRenameEdgeHostname,
+  type EmsDevice,
+} from '../hooks/useScanWizard';
 import { EdgeDrawer } from './EdgeDrawer';
+import { ScanWizard } from '../components/ScanWizard';
 
 const { Title, Text } = Typography;
 
@@ -42,6 +49,9 @@ export default function Edges() {
   const [revokeTarget, setRevokeTarget] = useState<Edge | null>(null);
   const [revokeReason, setRevokeReason] = useState('');
   const [drawerEdge, setDrawerEdge] = useState<Edge | null>(null);
+  const [scanEdgeId, setScanEdgeId] = useState<string | null>(null);
+
+  const renameHostname = useRenameEdgeHostname();
 
   const pendingCount = useMemo(
     () => (edges ?? []).filter((e) => e.status === 'pending' || e.status === 'pending_replace').length,
@@ -163,7 +173,31 @@ export default function Edges() {
       ],
       onFilter: (value, record) => record.status === value,
     },
-    { title: '主機名', dataIndex: 'hostname', key: 'hostname', width: 140, render: (v) => v ?? '—' },
+    {
+      title: '主機名',
+      dataIndex: 'hostname',
+      key: 'hostname',
+      width: 180,
+      render: (v: string | null, record) => (
+        <Text
+          editable={{
+            tooltip: '點擊編輯主機名稱',
+            onChange: async (val: string) => {
+              const next = val.trim();
+              if (!next || next === (v ?? '')) return;
+              try {
+                await renameHostname.mutateAsync({ edgeId: record.edge_id, hostname: next });
+                message.success('主機名稱已更新');
+              } catch (e) {
+                message.error(`更新主機名稱失敗：${(e as Error).message}`);
+              }
+            },
+          }}
+        >
+          {v ?? '—'}
+        </Text>
+      ),
+    },
     {
       title: '指紋 (前 16)',
       dataIndex: 'fingerprint',
@@ -202,6 +236,7 @@ export default function Edges() {
         const canMaintenance = edge.status === 'approved';
         const canResume = edge.status === 'maintenance';
         const canResync = edge.status === 'approved' || edge.status === 'maintenance';
+        const canScan = edge.status === 'approved' || edge.status === 'maintenance';
         return (
           <Space wrap size={4}>
             {canApprove && (
@@ -213,6 +248,15 @@ export default function Edges() {
                 loading={approve.isPending}
               >
                 {edge.status === 'pending_replace' ? '核可換機' : '核可'}
+              </Button>
+            )}
+            {canScan && (
+              <Button
+                size="small"
+                icon={<ScanOutlined />}
+                onClick={() => setScanEdgeId(edge.edge_id)}
+              >
+                掃描設備
               </Button>
             )}
             {canMaintenance && (
@@ -283,6 +327,16 @@ export default function Edges() {
         pagination={{ pageSize: 20, showSizeChanger: true }}
         scroll={{ x: 1200 }}
         size="middle"
+        expandable={{
+          expandedRowRender: (record) => <EdgeDevicesTable edgeId={record.edge_id} />,
+          rowExpandable: (record) => record.status !== 'revoked',
+        }}
+      />
+
+      <ScanWizard
+        edgeId={scanEdgeId}
+        open={!!scanEdgeId}
+        onClose={() => setScanEdgeId(null)}
       />
 
       <Modal
@@ -305,5 +359,73 @@ export default function Edges() {
 
       <EdgeDrawer edge={drawerEdge} open={!!drawerEdge} onClose={() => setDrawerEdge(null)} />
     </div>
+  );
+}
+
+function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
+  const { data: devices, isLoading, error } = useEdgeDevices(edgeId);
+  const renameDevice = useRenameDevice();
+  const { message } = App.useApp();
+
+  if (isLoading) return <Text type="secondary">載入中...</Text>;
+  if (error) return <Text type="danger">載入設備失敗：{(error as Error).message}</Text>;
+
+  const rows = (devices ?? []).filter((d) => d.device_type !== '_placeholder');
+  if (rows.length === 0) return <Text type="secondary">尚無已註冊設備</Text>;
+
+  const columns: ColumnsType<EmsDevice> = [
+    { title: 'Device ID', dataIndex: 'device_id', key: 'device_id', width: 260 },
+    {
+      title: '名稱',
+      dataIndex: 'device_name',
+      key: 'name',
+      render: (v: string | null, row: EmsDevice) => (
+        <Text
+          editable={{
+            tooltip: '點擊編輯設備名稱',
+            onChange: async (val: string) => {
+              const next = val.trim();
+              if (!next || next === (v ?? '')) return;
+              try {
+                await renameDevice.mutateAsync({
+                  deviceId: row.device_id,
+                  deviceName: next,
+                  edgeId,
+                });
+                message.success('設備名稱已更新');
+              } catch (e) {
+                message.error(`更新設備名稱失敗：${(e as Error).message}`);
+              }
+            },
+          }}
+        >
+          {v ?? '—'}
+        </Text>
+      ),
+    },
+    {
+      title: '類型',
+      dataIndex: 'device_type',
+      key: 'type',
+      width: 120,
+      render: (v: string) => <Tag color="blue">{v}</Tag>,
+    },
+    {
+      title: '建立時間',
+      dataIndex: 'created_at',
+      key: 'created',
+      width: 180,
+      render: (v: string) => (v ? new Date(v).toLocaleString('zh-TW') : '—'),
+    },
+  ];
+
+  return (
+    <Table<EmsDevice>
+      rowKey="device_id"
+      size="small"
+      pagination={false}
+      dataSource={rows}
+      columns={columns}
+    />
   );
 }
