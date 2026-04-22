@@ -1,0 +1,44 @@
+-- Tydares EMS Central — 811C Thermal Summary
+-- P4: Central 端接收 811C ir_summary
+-- Run as: psql -h 192.168.10.204 -U ems -d ems_central -f 002_thermal_summary.sql
+--
+-- 真實架構（2026-04-15 確認）:
+--   Edge 端 edge-811c-summary.service 寫入 SQLite summary_queue，
+--   單一 zone 整張熱力圖統計，每 5 分鐘 1 筆 / 1 rpi
+--   ADR-025-811C-Image-Passthrough-SingleZone
+--
+-- Schema 設計:
+--   保留 device_id 為未來 per-camera 拆分預留欄位，
+--   目前 Edge 上傳時 device_id 統一填 '_all' (整個 rpi 一筆)
+--   UNIQUE(edge_id, device_id, ts_start) 保證冪等
+
+BEGIN;
+
+CREATE TABLE trx_thermal_summary (
+    id              BIGINT          GENERATED ALWAYS AS IDENTITY,
+    ts_start        TIMESTAMPTZ     NOT NULL,
+    ts_end          TIMESTAMPTZ     NOT NULL,
+    edge_id         VARCHAR(64)     NOT NULL,
+    device_id       VARCHAR(64)     NOT NULL DEFAULT '_all',
+    max_temp        NUMERIC(6,2)    NOT NULL,
+    min_temp        NUMERIC(6,2)    NOT NULL,
+    avg_temp        NUMERIC(6,2)    NOT NULL,
+    max_coord_row   INTEGER,
+    max_coord_col   INTEGER,
+    sample_count    INTEGER,
+    created_at      TIMESTAMPTZ     DEFAULT NOW(),
+    CONSTRAINT pk_trx_thermal_summary PRIMARY KEY (id, ts_start)
+);
+
+SELECT create_hypertable('trx_thermal_summary', 'ts_start',
+    chunk_time_interval => INTERVAL '1 day');
+
+-- 冪等鍵：同一 edge + device + 時間窗只能有一筆
+CREATE UNIQUE INDEX uk_thermal_summary_window
+    ON trx_thermal_summary(edge_id, device_id, ts_start);
+
+-- 查詢用：依 edge_id 取最新 / 趨勢
+CREATE INDEX ix_thermal_summary_edge_ts
+    ON trx_thermal_summary(edge_id, ts_start DESC);
+
+COMMIT;

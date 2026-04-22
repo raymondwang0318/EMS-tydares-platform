@@ -1,0 +1,726 @@
+-- Tydares EMS Central — PostgreSQL Initial Schema
+-- ADR-019 Phase 0 | Target: VM104 (192.168.10.204) / ems_central
+-- Converted from Oracle DDL + ESG_APEX schema
+-- Run as: psql -h 192.168.10.204 -U ems -d ems_central -f 001_initial_schema.sql
+
+BEGIN;
+
+-- ============================================================
+-- EXTENSIONS
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+-- ============================================================
+-- LAYER A: Edge-Central Handshake Tables
+-- ============================================================
+
+-- A1: Site
+CREATE TABLE ems_site (
+    site_id     VARCHAR(64)     NOT NULL,
+    site_name   VARCHAR(200)    NOT NULL,
+    created_at  TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    CONSTRAINT pk_ems_site PRIMARY KEY (site_id)
+);
+
+-- A2: Edge
+CREATE TABLE ems_edge (
+    edge_id     VARCHAR(64)     NOT NULL,
+    site_id     VARCHAR(64)     NOT NULL,
+    edge_name   VARCHAR(200),
+    created_at  TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    CONSTRAINT pk_ems_edge PRIMARY KEY (edge_id),
+    CONSTRAINT fk_ems_edge_site FOREIGN KEY (site_id) REFERENCES ems_site(site_id)
+);
+
+-- A3: Device
+CREATE TABLE ems_device (
+    device_id   VARCHAR(64)     NOT NULL,
+    edge_id     VARCHAR(64)     NOT NULL,
+    device_type VARCHAR(64)     NOT NULL,
+    device_name VARCHAR(200),
+    created_at  TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    CONSTRAINT pk_ems_device PRIMARY KEY (device_id),
+    CONSTRAINT fk_ems_device_edge FOREIGN KEY (edge_id) REFERENCES ems_edge(edge_id)
+);
+
+-- A4: Dictionaries
+CREATE TABLE ems_dict_status (
+    status_code VARCHAR(64)     NOT NULL,
+    status_name VARCHAR(200)    NOT NULL,
+    is_active   BOOLEAN         DEFAULT TRUE NOT NULL,
+    CONSTRAINT pk_ems_dict_status PRIMARY KEY (status_code)
+);
+
+CREATE TABLE ems_dict_event_type (
+    event_type  VARCHAR(64)     NOT NULL,
+    event_name  VARCHAR(200)    NOT NULL,
+    is_active   BOOLEAN         DEFAULT TRUE NOT NULL,
+    CONSTRAINT pk_ems_dict_event_type PRIMARY KEY (event_type)
+);
+
+-- A5: Heartbeat
+CREATE TABLE ems_edge_heartbeat (
+    edge_id      VARCHAR(64)    NOT NULL,
+    hb_ts        TIMESTAMPTZ    NOT NULL,
+    ip_addr      VARCHAR(64),
+    payload_json JSONB,
+    CONSTRAINT pk_ems_edge_heartbeat PRIMARY KEY (edge_id, hb_ts),
+    CONSTRAINT fk_ems_edge_heartbeat_edge FOREIGN KEY (edge_id) REFERENCES ems_edge(edge_id)
+);
+
+-- A6: Edge Credential (ADR-021 Three-Layer Auth)
+CREATE TABLE ems_edge_credential (
+    edge_id             VARCHAR(64)     PRIMARY KEY,
+    token_hash          VARCHAR(128)    NOT NULL,
+    fingerprint         VARCHAR(128),
+    fingerprint_prev    VARCHAR(128),
+    status              VARCHAR(20)     NOT NULL DEFAULT 'pending',
+    hostname            VARCHAR(128),
+    last_seen_ip        VARCHAR(45),
+    last_seen_at        TIMESTAMPTZ,
+    registered_at       TIMESTAMPTZ     DEFAULT NOW(),
+    approved_at         TIMESTAMPTZ,
+    approved_by         VARCHAR(128),
+    maintenance_at      TIMESTAMPTZ,
+    maintenance_by      VARCHAR(128),
+    replaced_at         TIMESTAMPTZ,
+    revoked_at          TIMESTAMPTZ,
+    revoked_reason      TEXT,
+    CONSTRAINT chk_credential_status
+        CHECK (status IN ('pending', 'approved', 'maintenance', 'pending_replace', 'revoked'))
+);
+
+-- A7: Ingest Inbox
+CREATE TABLE ems_ingest_inbox (
+    idemp_key       VARCHAR(128)    NOT NULL,
+    site_id         VARCHAR(64)     NOT NULL,
+    edge_id         VARCHAR(64)     NOT NULL,
+    device_id       VARCHAR(64),
+    msg_ts          TIMESTAMPTZ,
+    msg_type        VARCHAR(64),
+    received_at     TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    payload_json    JSONB           NOT NULL,
+    payload_sha256  VARCHAR(64),
+    CONSTRAINT pk_ems_ingest_inbox PRIMARY KEY (idemp_key)
+);
+
+CREATE INDEX ix_ingest_inbox_received ON ems_ingest_inbox(received_at);
+CREATE INDEX ix_ingest_inbox_site_edge ON ems_ingest_inbox(site_id, edge_id, received_at);
+
+-- A8: Commands
+CREATE TABLE ems_commands (
+    command_id      VARCHAR(128)    NOT NULL,
+    device_id       VARCHAR(64)     NOT NULL,
+    command_type    VARCHAR(128)    NOT NULL,
+    payload_json    JSONB,
+    result_json     JSONB,
+    status          VARCHAR(32)     NOT NULL,
+    priority        INTEGER         DEFAULT 50 NOT NULL,
+    not_before_ts   TIMESTAMPTZ,
+    expire_ts       TIMESTAMPTZ,
+    idempotency_key VARCHAR(128),
+    issued_by       VARCHAR(128),
+    created_at      TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    updated_at      TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    CONSTRAINT pk_ems_commands PRIMARY KEY (command_id),
+    CONSTRAINT ck_ems_commands_status CHECK (
+        status IN ('QUEUED', 'DELIVERED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'EXPIRED', 'CANCELED')
+    ),
+    CONSTRAINT fk_ems_commands_device FOREIGN KEY (device_id) REFERENCES ems_device(device_id)
+);
+
+CREATE UNIQUE INDEX uk_ems_commands_idempotency ON ems_commands(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE INDEX ix_ems_commands_poll ON ems_commands(status, priority, created_at)
+    WHERE status = 'QUEUED';
+
+-- A9: Command Events
+CREATE TABLE ems_command_events (
+    event_id        BIGINT          GENERATED ALWAYS AS IDENTITY,
+    command_id      VARCHAR(128)    NOT NULL,
+    ts              TIMESTAMPTZ     DEFAULT NOW() NOT NULL,
+    from_status     VARCHAR(32),
+    to_status       VARCHAR(32)     NOT NULL,
+    message         VARCHAR(2000),
+    result_json     JSONB,
+    CONSTRAINT pk_ems_command_events PRIMARY KEY (event_id),
+    CONSTRAINT fk_ems_command_events_cmd FOREIGN KEY (command_id)
+        REFERENCES ems_commands(command_id) ON DELETE CASCADE,
+    CONSTRAINT ck_ems_command_events_to CHECK (
+        to_status IN ('QUEUED', 'DELIVERED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'EXPIRED', 'CANCELED')
+    )
+);
+
+CREATE INDEX ix_command_events_cmd ON ems_command_events(command_id, ts);
+
+-- ============================================================
+-- LAYER B: ESG_APEX Foundation Tables (FND_*)
+-- ============================================================
+
+-- B1: Config
+CREATE TABLE fnd_config (
+    config_id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    config_code                 VARCHAR(50),
+    config_name                 VARCHAR(150),
+    domain_name_or_ip_address   VARCHAR(150),
+    port_number                 INTEGER,
+    callback_server_domain_ip   VARCHAR(150),
+    callback_server_port        INTEGER,
+    remark_desc                 VARCHAR(500),
+    created_by                  INTEGER,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B2: Electric Parameter (independent, referenced by many)
+CREATE TABLE fnd_electric_parameter (
+    electric_parameter_id   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    electric_parameter_code VARCHAR(50),
+    electric_parameter_name VARCHAR(150),
+    uom_name                VARCHAR(30),
+    data_type               VARCHAR(30),
+    decimal_place           INTEGER,
+    function_code           VARCHAR(10),
+    parameter_category      VARCHAR(30),
+    display_seq             INTEGER,
+    remark_desc             VARCHAR(500),
+    created_by              INTEGER,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B3: Hub
+CREATE TABLE fnd_hub (
+    hub_id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    config_id           BIGINT REFERENCES fnd_config(config_id),
+    hub_code            VARCHAR(50),
+    hub_name            VARCHAR(150),
+    hub_model_name      VARCHAR(150),
+    hub_ip              VARCHAR(150),
+    hub_local_ip        VARCHAR(150),
+    hub_local_port      INTEGER,
+    hub_api_key         VARCHAR(300),
+    modbus_config_json  JSONB,
+    auth_api_key        VARCHAR(300),
+    status              VARCHAR(1),
+    remark_desc         VARCHAR(500),
+    created_by          INTEGER,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_by          INTEGER,
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B4: Meter
+CREATE TABLE fnd_meter (
+    meter_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_id          BIGINT REFERENCES fnd_hub(hub_id),
+    meter_code      VARCHAR(50),
+    meter_uid       VARCHAR(50),
+    meter_name      VARCHAR(150),
+    device_type     VARCHAR(30),
+    remark_desc     VARCHAR(500),
+    created_by      INTEGER,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by      INTEGER,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B5: Modbus Device Model
+CREATE TABLE fnd_modbus_device_model (
+    modbus_device_model_id  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_model_code VARCHAR(50),
+    modbus_device_model_name VARCHAR(150),
+    modbus_device_model_type VARCHAR(30),
+    slave_id_default        INTEGER,
+    remark_desc             VARCHAR(500),
+    created_by              INTEGER,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B6: Modbus Device
+CREATE TABLE fnd_modbus_device (
+    modbus_device_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_id                  BIGINT REFERENCES fnd_hub(hub_id),
+    modbus_device_model_id  BIGINT REFERENCES fnd_modbus_device_model(modbus_device_model_id),
+    modbus_device_code      VARCHAR(50),
+    modbus_device_name      VARCHAR(150),
+    device_uid              VARCHAR(30),
+    slave_id                INTEGER,
+    status                  VARCHAR(1),
+    remark_desc             VARCHAR(500),
+    created_by              INTEGER,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B7: Modbus Device Model Circuit
+CREATE TABLE fnd_modbus_device_model_circuit (
+    modbus_device_model_circuit_id  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_model_id          BIGINT REFERENCES fnd_modbus_device_model(modbus_device_model_id),
+    modbus_device_model_circuit_code VARCHAR(50),
+    modbus_device_model_circuit_name VARCHAR(150),
+    remark_desc                     VARCHAR(500),
+    created_by                      INTEGER,
+    created_at                      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                      INTEGER,
+    updated_at                      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B8: Modbus Device Model Circuit Parameter
+CREATE TABLE fnd_modbus_device_model_circuit_parameter (
+    modbus_device_model_circuit_parameter_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_model_circuit_id  BIGINT REFERENCES fnd_modbus_device_model_circuit(modbus_device_model_circuit_id),
+    electric_parameter_id           BIGINT REFERENCES fnd_electric_parameter(electric_parameter_id),
+    parameter_high_word_address     VARCHAR(10),
+    parameter_low_word_address      VARCHAR(10),
+    decimal_place                   INTEGER,
+    data_type                       VARCHAR(30),
+    function_code                   VARCHAR(10),
+    remark_desc                     VARCHAR(500),
+    created_by                      INTEGER,
+    created_at                      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                      INTEGER,
+    updated_at                      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B9: Modbus Device Circuit
+CREATE TABLE fnd_modbus_device_circuit (
+    modbus_device_circuit_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_id                BIGINT REFERENCES fnd_modbus_device(modbus_device_id),
+    modbus_device_model_circuit_id  BIGINT REFERENCES fnd_modbus_device_model_circuit(modbus_device_model_circuit_id),
+    display_seq                     INTEGER,
+    on_off_status                   VARCHAR(3),
+    created_by                      INTEGER,
+    created_at                      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                      INTEGER,
+    updated_at                      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B10: ECSU (Electricity Cost Settlement Unit)
+CREATE TABLE fnd_ecsu (
+    ecsu_id                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ecsu_code_1                 VARCHAR(30),
+    ecsu_code_2                 VARCHAR(30),
+    ecsu_code_3                 VARCHAR(150),
+    ecsu_name                   VARCHAR(150),
+    display_seq                 INTEGER,
+    voltage                     NUMERIC,
+    avg_electric_current        NUMERIC,
+    frequency                   NUMERIC,
+    active_power                NUMERIC,
+    power_factor                NUMERIC,
+    thd                         NUMERIC,
+    tot_input_active_energy     NUMERIC,
+    active_power_demand         NUMERIC,
+    status                      VARCHAR(1),
+    remark_desc                 VARCHAR(500),
+    created_by                  INTEGER,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B11: ECSU ↔ Meter Assignment
+CREATE TABLE fnd_ecsu_meter_assgn (
+    ecsu_meter_assgn_id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ecsu_id                     BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    meter_id                    BIGINT REFERENCES fnd_meter(meter_id),
+    on_off_status_indicator_yn  BOOLEAN DEFAULT FALSE,
+    remark_desc                 VARCHAR(500),
+    created_by                  INTEGER,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B12: ECSU ↔ Modbus Device Circuit Assignment
+CREATE TABLE fnd_ecsu_modbus_device_circuit_assgn (
+    ecsu_modbus_device_circuit_assgn_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ecsu_id                     BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    modbus_device_circuit_id    BIGINT REFERENCES fnd_modbus_device_circuit(modbus_device_circuit_id),
+    on_off_status               VARCHAR(3),
+    remark_desc                 VARCHAR(500),
+    created_by                  INTEGER,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B13: Electricity Billing Standard
+CREATE TABLE fnd_elec_billing_standard (
+    elec_billing_standard_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    week_day                    VARCHAR(3),
+    period_type                 VARCHAR(30),
+    summer_time_yn              BOOLEAN DEFAULT FALSE,
+    period_start_time           VARCHAR(4),
+    period_end_time             VARCHAR(4),
+    unit_price                  NUMERIC,
+    color_setting               VARCHAR(50),
+    remark_desc                 VARCHAR(500),
+    created_by                  INTEGER,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B14: Electricity Billing Tier
+CREATE TABLE fnd_elec_billing_tier (
+    elec_billing_tier_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    elec_billing_tier_code  VARCHAR(50),
+    effective_date          TIMESTAMPTZ,
+    start_kwh               NUMERIC,
+    end_kwh                 NUMERIC,
+    unit_price              NUMERIC,
+    remark_desc             VARCHAR(500),
+    created_by              INTEGER,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B15: API Template
+CREATE TABLE fnd_api_template (
+    api_template_id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    api_template_code       VARCHAR(50),
+    api_template_name       VARCHAR(150),
+    api_url_template_text   VARCHAR(150),
+    api_request_template_text  TEXT,
+    api_response_template_text TEXT,
+    http_method             VARCHAR(10),
+    api_apply_object        VARCHAR(30),
+    remark_desc             VARCHAR(500),
+    created_by              INTEGER,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B16: API Call Log
+CREATE TABLE fnd_api_call (
+    api_call_id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    api_template_id     BIGINT REFERENCES fnd_api_template(api_template_id),
+    hub_id              BIGINT REFERENCES fnd_hub(hub_id),
+    meter_id            BIGINT REFERENCES fnd_meter(meter_id),
+    modbus_device_id    BIGINT REFERENCES fnd_modbus_device(modbus_device_id),
+    request_url         VARCHAR(150),
+    request_body        JSONB,
+    response_body       JSONB,
+    exec_duration_time  INTEGER,
+    remark_desc         VARCHAR(500),
+    created_by          INTEGER,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_by          INTEGER,
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B17: Register Account
+CREATE TABLE fnd_register_account (
+    register_account_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_name        VARCHAR(150),
+    password_hash       VARCHAR(128),
+    display_name        VARCHAR(150),
+    email               VARCHAR(200),
+    phone               VARCHAR(50),
+    role                VARCHAR(30),
+    status              VARCHAR(1),
+    remark_desc         VARCHAR(500),
+    created_by          INTEGER,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_by          INTEGER,
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B18: Parameter (system config key-value)
+CREATE TABLE fnd_parameter (
+    parameter_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    param_code      VARCHAR(50),
+    param_name      VARCHAR(150),
+    param_value     VARCHAR(500),
+    remark_desc     VARCHAR(500),
+    created_by      INTEGER,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by      INTEGER,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B19: Time Period Mapping
+CREATE TABLE fnd_time_period_mapping (
+    period_id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    period_code     VARCHAR(50),
+    period_name     VARCHAR(150),
+    period_seq      INTEGER,
+    quarter_start   INTEGER,
+    quarter_end     INTEGER,
+    time_start      VARCHAR(10),
+    time_end        VARCHAR(10),
+    created_by      INTEGER,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_by      INTEGER,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- LAYER C: Transaction / Time-Series Tables (TRX_*)
+-- ============================================================
+
+-- C1: All Peripheral Periodical Reading (HIGH FREQUENCY → hypertable)
+CREATE TABLE trx_all_peripheral_periodical_reading (
+    all_peripheral_periodical_reading_id BIGINT GENERATED ALWAYS AS IDENTITY,
+    ecsu_id                 BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    meter_circuit_id        BIGINT,
+    creation_date_group     TIMESTAMPTZ,
+    voltage                 NUMERIC,
+    avg_electric_current    NUMERIC,
+    frequency               NUMERIC,
+    active_power            NUMERIC,
+    power_factor            NUMERIC,
+    thd                     NUMERIC,
+    total_input_active_energy NUMERIC,
+    active_power_demand     NUMERIC,
+    prev_energy             NUMERIC,
+    peak_energy_diff        NUMERIC,
+    mid_peak_energy_diff    NUMERIC,
+    off_peak_energy_diff    NUMERIC,
+    period_type             VARCHAR(30),
+    price                   NUMERIC,
+    energy_charge           NUMERIC,
+    quarter_seq             INTEGER,
+    prev_creation_date      TIMESTAMPTZ,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    CONSTRAINT pk_trx_reading PRIMARY KEY (all_peripheral_periodical_reading_id, creation_date)
+);
+
+SELECT create_hypertable('trx_all_peripheral_periodical_reading', 'creation_date',
+    chunk_time_interval => INTERVAL '1 day');
+
+-- C2: Periodical Energy Daily (→ hypertable)
+CREATE TABLE trx_periodical_energy_daily (
+    periodical_energy_daily_id BIGINT GENERATED ALWAYS AS IDENTITY,
+    ecsu_id                 BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    meter_circuit_id        BIGINT,
+    creation_date_group     TIMESTAMPTZ,
+    voltage                 NUMERIC,
+    avg_electric_current    NUMERIC,
+    frequency               NUMERIC,
+    active_power            NUMERIC,
+    power_factor            NUMERIC,
+    thd                     NUMERIC,
+    total_input_active_energy NUMERIC,
+    active_power_demand     NUMERIC,
+    prev_energy             NUMERIC,
+    peak_energy_diff        NUMERIC,
+    mid_peak_energy_diff    NUMERIC,
+    off_peak_energy_diff    NUMERIC,
+    energy_charge           NUMERIC,
+    prev_creation_date      TIMESTAMPTZ,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    CONSTRAINT pk_trx_energy_daily PRIMARY KEY (periodical_energy_daily_id, creation_date)
+);
+
+SELECT create_hypertable('trx_periodical_energy_daily', 'creation_date',
+    chunk_time_interval => INTERVAL '1 month');
+
+-- C3: Periodical Energy Monthly
+CREATE TABLE trx_periodical_energy_monthly (
+    periodical_energy_monthly_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ecsu_id                 BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    meter_circuit_id        BIGINT,
+    creation_date_group     TIMESTAMPTZ,
+    voltage                 NUMERIC,
+    avg_electric_current    NUMERIC,
+    frequency               NUMERIC,
+    active_power            NUMERIC,
+    power_factor            NUMERIC,
+    thd                     NUMERIC,
+    total_input_active_energy NUMERIC,
+    active_power_demand     NUMERIC,
+    prev_energy             NUMERIC,
+    peak_energy_diff        NUMERIC,
+    mid_peak_energy_diff    NUMERIC,
+    off_peak_energy_diff    NUMERIC,
+    energy_charge           NUMERIC,
+    prev_creation_date      TIMESTAMPTZ,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C4: Periodical Energy Quarterly (15-min intervals → hypertable)
+CREATE TABLE trx_periodical_energy_quarterly (
+    periodical_energy_quarterly_id BIGINT GENERATED ALWAYS AS IDENTITY,
+    ecsu_id                 BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    meter_circuit_id        BIGINT,
+    creation_date_group     TIMESTAMPTZ,
+    quarter_seq             INTEGER,
+    voltage                 NUMERIC,
+    avg_electric_current    NUMERIC,
+    frequency               NUMERIC,
+    active_power            NUMERIC,
+    power_factor            NUMERIC,
+    thd                     NUMERIC,
+    total_input_active_energy NUMERIC,
+    active_power_demand     NUMERIC,
+    prev_energy             NUMERIC,
+    peak_energy_diff        NUMERIC,
+    mid_peak_energy_diff    NUMERIC,
+    off_peak_energy_diff    NUMERIC,
+    price                   NUMERIC,
+    energy_charge           NUMERIC,
+    prev_creation_date      TIMESTAMPTZ,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER,
+    CONSTRAINT pk_trx_energy_quarterly PRIMARY KEY (periodical_energy_quarterly_id, creation_date)
+);
+
+SELECT create_hypertable('trx_periodical_energy_quarterly', 'creation_date',
+    chunk_time_interval => INTERVAL '1 week');
+
+-- C5: ECSU Tier Charge
+CREATE TABLE trx_ecsu_tier_charge (
+    ecsu_tier_charge_id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ecsu_id                 BIGINT REFERENCES fnd_ecsu(ecsu_id),
+    elec_billing_tier_id    BIGINT REFERENCES fnd_elec_billing_tier(elec_billing_tier_id),
+    charge_date             TIMESTAMPTZ,
+    kwh_usage               NUMERIC,
+    charge_amount           NUMERIC,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C6: Communication Success Rate Daily
+CREATE TABLE trx_comm_success_rate_daily (
+    circuit_cs_rate_daily_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_circuit_id BIGINT REFERENCES fnd_modbus_device_circuit(modbus_device_circuit_id),
+    rate_date               TIMESTAMPTZ,
+    total_polls             INTEGER,
+    success_polls           INTEGER,
+    success_rate            NUMERIC,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C7: Communication Abnormal Record
+CREATE TABLE trx_comm_abn_record (
+    comm_abn_record_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    modbus_device_circuit_id    BIGINT REFERENCES fnd_modbus_device_circuit(modbus_device_circuit_id),
+    modbus_device_model_circuit_id BIGINT REFERENCES fnd_modbus_device_model_circuit(modbus_device_model_circuit_id),
+    modbus_device_id            BIGINT REFERENCES fnd_modbus_device(modbus_device_id),
+    abn_type                    VARCHAR(50),
+    abn_message                 VARCHAR(500),
+    abn_date                    TIMESTAMPTZ,
+    remark_desc                 VARCHAR(500),
+    creation_date               TIMESTAMPTZ DEFAULT NOW(),
+    created_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER
+);
+
+-- C8: Hub Callback Reading
+CREATE TABLE trx_hub_callback_reading (
+    callback_reading_update_id  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_id                      BIGINT,
+    meter_id                    BIGINT,
+    modbus_device_id            BIGINT,
+    callback_data               JSONB,
+    remark_desc                 VARCHAR(500),
+    creation_date               TIMESTAMPTZ DEFAULT NOW(),
+    created_by                  INTEGER,
+    updated_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by                  INTEGER
+);
+
+-- C9: Hub Linked Meter Scan Batch Control
+CREATE TABLE trx_hub_linked_meter_scan_batch_ctl (
+    hub_linked_meter_scan_batch_ctl_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_id                  BIGINT REFERENCES fnd_hub(hub_id),
+    scan_start_time         TIMESTAMPTZ,
+    scan_end_time           TIMESTAMPTZ,
+    status                  VARCHAR(30),
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C10: Hub Linked Meter Scan Batch Transaction
+CREATE TABLE trx_hub_linked_meter_scan_batch_trxn (
+    hub_linked_meter_scan_batch_trxn_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_linked_meter_scan_batch_ctl_id  BIGINT REFERENCES trx_hub_linked_meter_scan_batch_ctl(hub_linked_meter_scan_batch_ctl_id),
+    meter_uid               VARCHAR(50),
+    scan_result             VARCHAR(100),
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C11: Meter Device To Be Removed
+CREATE TABLE trx_meter_device_to_be_removed (
+    meter_device_to_be_removed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    hub_id                  BIGINT REFERENCES fnd_hub(hub_id),
+    api_call_id             BIGINT REFERENCES fnd_api_call(api_call_id),
+    peripheral_type         VARCHAR(30),
+    peripheral_uid          VARCHAR(50),
+    meter_new_hub_id        BIGINT,
+    removal_api_call_id     BIGINT,
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C12: Operation History
+CREATE TABLE trx_operation_history (
+    operation_history_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    operation_type          VARCHAR(50),
+    operation_desc          VARCHAR(1000),
+    operation_data          JSONB,
+    operator                VARCHAR(128),
+    remark_desc             VARCHAR(500),
+    creation_date           TIMESTAMPTZ DEFAULT NOW(),
+    created_by              INTEGER,
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_by              INTEGER
+);
+
+-- C13: ECSU Transactions (real-time data)
+CREATE TABLE ecsu_transactions (
+    ecsu_code               VARCHAR(92),
+    voltage                 NUMERIC,
+    avg_electric_current    NUMERIC,
+    frequency               NUMERIC,
+    active_power            NUMERIC,
+    power_factor            NUMERIC,
+    total_input_active_energy NUMERIC,
+    active_power_demand     NUMERIC,
+    data_time               VARCHAR(30)
+);
+
+COMMIT;

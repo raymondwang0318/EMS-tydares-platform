@@ -1,0 +1,229 @@
+"""V2-final Worker (ADR-026 DR-026-01).
+
+職責：
+1. 讀 ems_ingest_inbox 未處理記錄（processed_at IS NULL）
+2. 依 source_type 展平 payload → 寫入 trx_reading
+3. 標 processed_at 讓 inbox 之後可清理
+4. 每 5 分鐘清除超過 1 小時且已處理的 inbox 記錄
+
+Usage:
+    python -m app.worker
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config import settings
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("worker")
+
+BATCH_SIZE = 200
+POLL_INTERVAL_SEC = 2.0
+INBOX_RETENTION_SEC = 3600        # 1 小時
+CLEANUP_INTERVAL_SEC = 300        # 5 分鐘
+
+
+def _ts_from_ms(ts_ms: int | None, fallback: datetime) -> datetime:
+    if ts_ms is None:
+        return fallback
+    try:
+        return datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _flatten_modbus(payload: dict, msg_ts: datetime, device_id: str) -> list[dict]:
+    """Modbus payload 格式示意：
+        {"circuits": {"Ma": {"voltage": 220.5, "active_power": 120.0}, "Ba1": {...}}}
+    或舊版扁平：
+        {"voltage": 220.5, "active_power": 120.0, "circuit_code": "Ma"}
+    """
+    rows: list[dict] = []
+    if isinstance(payload.get("circuits"), dict):
+        for circuit_code, params in payload["circuits"].items():
+            if not isinstance(params, dict):
+                continue
+            for param_code, value in params.items():
+                if not isinstance(value, (int, float)):
+                    continue
+                rows.append({
+                    "ts": msg_ts,
+                    "device_id": device_id,
+                    "circuit_code": circuit_code,
+                    "parameter_code": param_code,
+                    "value": float(value),
+                    "quality": 0,
+                })
+    else:
+        circuit_code = payload.get("circuit_code", "Ma")
+        for param_code, value in payload.items():
+            if param_code in ("circuit_code", "timestamp", "ts", "ts_ms"):
+                continue
+            if not isinstance(value, (int, float)):
+                continue
+            rows.append({
+                "ts": msg_ts,
+                "device_id": device_id,
+                "circuit_code": circuit_code,
+                "parameter_code": param_code,
+                "value": float(value),
+                "quality": 0,
+            })
+    return rows
+
+
+def _flatten_ir(payload: dict, msg_ts: datetime, device_id: str) -> list[dict]:
+    """熱像 summary 展平（max/min/avg temp）。"""
+    rows: list[dict] = []
+    for param_code in ("max_temp", "min_temp", "avg_temp"):
+        if param_code in payload and isinstance(payload[param_code], (int, float)):
+            rows.append({
+                "ts": msg_ts,
+                "device_id": device_id,
+                "circuit_code": "_all",
+                "parameter_code": param_code,
+                "value": float(payload[param_code]),
+                "quality": 0,
+            })
+    return rows
+
+
+async def process_batch(session_factory: async_sessionmaker) -> tuple[int, int]:
+    """處理一批 inbox 未處理記錄。回傳 (成功筆數, 失敗筆數)。
+
+    Fix 2026-04-22 (T-P12-002, M-PM-022 裁決 b):
+    原邏輯 flatten 失敗也標 processed_at 導致「資料丟失」違反 AC。改為：
+    - 成功 → processed_at = NOW()
+    - 失敗 → error_message = '...'（不動 processed_at），讓 row 留在 Inbox 供人工檢視
+    - SELECT 加 `AND error_message IS NULL` 避免失敗 row 被無限重抓
+    """
+    async with session_factory() as db:
+        result = await db.execute(
+            text("""
+                SELECT idemp_key, edge_id, device_id, source_type, msg_ts, payload_json
+                FROM ems_ingest_inbox
+                WHERE processed_at IS NULL
+                  AND error_message IS NULL
+                ORDER BY received_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT :limit
+            """),
+            {"limit": BATCH_SIZE},
+        )
+        rows = result.fetchall()
+        if not rows:
+            return (0, 0)
+
+        processed_keys: list[str] = []
+        error_entries: list[dict] = []
+        reading_rows: list[dict] = []
+
+        for row in rows:
+            idemp_key, edge_id, device_id, source_type, msg_ts, payload = row
+            try:
+                if source_type == "modbus" and device_id:
+                    reading_rows.extend(_flatten_modbus(payload or {}, msg_ts, device_id))
+                elif source_type == "ir" and device_id:
+                    reading_rows.extend(_flatten_ir(payload or {}, msg_ts, device_id))
+                # 其他 source_type（relay_state 等）暫不展平，直接標 processed
+                processed_keys.append(idemp_key)
+            except Exception as e:
+                log.warning("flatten failed key=%s err=%s", idemp_key, e)
+                # M-PM-022 (b): 留 Inbox + error_message + 不標 processed_at
+                error_msg = f"flatten_failed: {type(e).__name__}: {str(e)[:500]}"
+                error_entries.append({"idemp_key": idemp_key, "error_msg": error_msg})
+
+        # 批次插入 trx_reading（ON CONFLICT 不需要，hypertable 無 UNIQUE）
+        if reading_rows:
+            await db.execute(
+                text("""
+                    INSERT INTO trx_reading
+                        (ts, device_id, circuit_code, parameter_code, value, quality)
+                    VALUES
+                        (:ts, :device_id, :circuit_code, :parameter_code, :value, :quality)
+                """),
+                reading_rows,
+            )
+
+        # 成功項標 processed_at
+        if processed_keys:
+            await db.execute(
+                text("""
+                    UPDATE ems_ingest_inbox
+                    SET processed_at = NOW()
+                    WHERE idemp_key = ANY(:keys)
+                """),
+                {"keys": processed_keys},
+            )
+
+        # 失敗項標 error_message（不動 processed_at）
+        if error_entries:
+            await db.execute(
+                text("""
+                    UPDATE ems_ingest_inbox
+                    SET error_message = :error_msg
+                    WHERE idemp_key = :idemp_key
+                """),
+                error_entries,
+            )
+
+        await db.commit()
+        return (len(processed_keys), len(error_entries))
+
+
+async def cleanup_inbox(session_factory: async_sessionmaker) -> int:
+    """清理已處理超過 1 小時的 inbox 記錄。
+
+    Fix 2026-04-22 (T-P12-002, M-PM-022 裁決 A):
+    原 SQL `(:sec || ' seconds')::interval` 會讓 asyncpg adapter 推斷 $1 為 str,
+    Python int 3600 觸發 asyncpg.DataError (invalid input for query argument $1:
+    3600 (expected str, got int))。改為 PostgreSQL 原生 make_interval() constructor,
+    asyncpg 推 $1 為 int,型別匹配。
+    """
+    async with session_factory() as db:
+        result = await db.execute(
+            text("""
+                DELETE FROM ems_ingest_inbox
+                WHERE processed_at IS NOT NULL
+                  AND received_at < NOW() - make_interval(secs => :sec)
+            """),
+            {"sec": INBOX_RETENTION_SEC},
+        )
+        await db.commit()
+        return result.rowcount or 0
+
+
+async def main():
+    engine = create_async_engine(settings.database_url, pool_size=5, max_overflow=5)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    log.info("V2-final worker starting (ADR-026)")
+    last_cleanup = time.monotonic()
+
+    try:
+        while True:
+            success, failed = await process_batch(session_factory)
+            if success or failed:
+                log.info("batch: success=%d failed=%d", success, failed)
+            if (success + failed) == 0:
+                await asyncio.sleep(POLL_INTERVAL_SEC)
+
+            # 週期清理
+            if time.monotonic() - last_cleanup > CLEANUP_INTERVAL_SEC:
+                deleted = await cleanup_inbox(session_factory)
+                log.info("cleanup tick: deleted=%d old inbox rows", deleted)
+                last_cleanup = time.monotonic()
+    finally:
+        await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
