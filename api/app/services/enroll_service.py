@@ -36,7 +36,8 @@ async def enroll_edge(
     """建立或更新 enroll 請求。
 
     規則：
-    - 若 edge_id 已存在且指紋匹配 → 視為心跳，直接回傳當前狀態
+    - 若 edge_id 已存在且指紋匹配 → 視為心跳；**若 status=approved 則 rotate 新 token 回傳**
+      （救 P10 enroll-bug：首次發 token 後 Edge 未 persist 造成永卡 None；M-P11-005 + M-PM-029）
     - 若 edge_id 已存在但指紋不符 → status=pending_replace，記歷史指紋
     - 若 edge_id 為 None 或未存在 → 建立新 pending 記錄
     """
@@ -47,6 +48,9 @@ async def enroll_edge(
         edge = result.scalar_one_or_none()
     else:
         edge = None
+
+    # 本次 enroll 若為「approved 狀態 + fingerprint match 的 re-enroll」，在此 rotate
+    token_plain: str | None = None
 
     if edge is None:
         # 新 Edge 註冊
@@ -74,6 +78,23 @@ async def enroll_edge(
             edge.fingerprint = fingerprint
             edge.hostname = hostname
 
+        # === 救 P10 enroll-bug：approved + fingerprint match → rotate 新 token ===
+        # 依 M-P11-005 分析 + M-PM-029 批 + 回執_M-P11-006 選項 A 安全模型：
+        # Central DB 只存 token_hash（SHA256 不可逆）→ 無法「回傳 existing token」。
+        # 替代：fingerprint match（本機 machine-id + mac_addr 綁定）= 身份確認 → rotate。
+        # Edge 首次 approve 後若未 persist identity.json（斷網/crash）→ 用此路徑拿新 token 救場。
+        if edge.status == "approved" and edge.fingerprint == fingerprint:
+            token_plain = secrets.token_urlsafe(32)
+            edge.token_hash = _hash_token(token_plain)
+            db.add(EmsEvent(
+                event_kind="edge_lifecycle",
+                severity="warn",
+                edge_id=edge.edge_id,
+                actor=hostname,
+                message="token re-issued (Edge re-enroll with matching fingerprint)",
+                data_json={"request_id": request_id},
+            ))
+
     # 事件
     db.add(EmsEvent(
         event_kind="edge_lifecycle",
@@ -90,7 +111,7 @@ async def enroll_edge(
         "request_id": request_id,
         "edge_id": edge.edge_id,
         "status": edge.status,
-        "token": None,
+        "token": token_plain,       # approved + fingerprint match 時為新 token；其他情況為 None
         "message": "Waiting for admin approval" if edge.status == "pending" else None,
     }
 
