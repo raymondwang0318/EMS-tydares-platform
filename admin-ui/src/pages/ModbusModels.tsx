@@ -17,5 +17,6 @@ const formFields = [
 ];
 
 export default function ModbusModels() {
-  return <CrudTable title="設備型號" apiPath="/admin/modbus-models" columns={columns} formFields={formFields} rowKey="modbus_device_model_id" />;
+  // V2-final endpoint 對齊：/admin/modbus-models → /admin/device-models（baseURL /v1）
+  return <CrudTable title="設備型號" apiPath="/admin/device-models" columns={columns} formFields={formFields} rowKey="modbus_device_model_id" />;
 }

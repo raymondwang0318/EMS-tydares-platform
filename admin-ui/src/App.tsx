@@ -1,15 +1,26 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { Empty, Typography } from 'antd';
+import { Empty, Typography, Alert } from 'antd';
 import AdminLayout from './layouts/AdminLayout';
 import Edges from './pages/Edges';
+import Dashboard from './pages/Dashboard';
+import ModbusDevices from './pages/ModbusDevices';
+import ModbusModels from './pages/ModbusModels';
+import Ecsu from './pages/Ecsu';
+import BillingStandard from './pages/BillingStandard';
+import Reports from './pages/Reports';
 
 const { Title, Paragraph } = Typography;
 
-function PlaceholderPage({ title, hint }: { title: string; hint?: string }) {
+function ConfigPlaceholder() {
   return (
     <div>
-      <Title level={3} style={{ marginTop: 0 }}>{title}</Title>
-      <Empty description={hint ?? '此頁將於後續 Phase 實作'} />
+      <Title level={3} style={{ marginTop: 0 }}>系統設定</Title>
+      <Alert
+        type="info"
+        showIcon
+        message="Central V2-final 目前未提供 /v1/admin/configs 端點"
+        description="舊版 /admin/configs CRUD 已於 Oracle 下線階段棄用；V2-final 的系統設定改走 docker-compose env_file (api/.env) + ADR-026 定義。若需要管理介面，由下一 phase 另規劃 endpoint。"
+      />
     </div>
   );
 }
@@ -26,21 +37,30 @@ function LoginPlaceholder() {
   );
 }
 
+function NotFound() {
+  return (
+    <div>
+      <Title level={3} style={{ marginTop: 0 }}>404</Title>
+      <Empty description="此頁不存在，請從左側選單導航" />
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter basename="/admin-ui">
       <Routes>
         <Route path="/login" element={<LoginPlaceholder />} />
         <Route element={<AdminLayout />}>
-          <Route path="/" element={<PlaceholderPage title="總覽 (Dashboard)" hint="Phase 2.3 建骨架、Phase 3+ 填內容" />} />
+          <Route path="/" element={<Dashboard />} />
           <Route path="/edges" element={<Edges />} />
-          <Route path="/devices" element={<PlaceholderPage title="設備管理" hint="Phase 4 實作" />} />
-          <Route path="/device-models" element={<PlaceholderPage title="設備型號" hint="Phase 5a 實作" />} />
-          <Route path="/ecsu" element={<PlaceholderPage title="計費單位 (ECSU)" hint="Phase 5a 實作" />} />
-          <Route path="/billing" element={<PlaceholderPage title="電價規則" hint="Phase 5b 實作" />} />
-          <Route path="/reports" element={<PlaceholderPage title="報表" hint="Phase 5b 實作" />} />
-          <Route path="/config" element={<PlaceholderPage title="系統設定" hint="Phase 2.3 建骨架" />} />
-          <Route path="*" element={<PlaceholderPage title="404" hint="此頁不存在，請從左側選單導航" />} />
+          <Route path="/devices" element={<ModbusDevices />} />
+          <Route path="/device-models" element={<ModbusModels />} />
+          <Route path="/ecsu" element={<Ecsu />} />
+          <Route path="/billing" element={<BillingStandard />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/config" element={<ConfigPlaceholder />} />
+          <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
     </BrowserRouter>
