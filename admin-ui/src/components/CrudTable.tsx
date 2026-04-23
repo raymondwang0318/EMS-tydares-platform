@@ -10,6 +10,21 @@ interface CrudTableProps {
   columns: ColumnsType<any>;
   formFields: FormFieldDef[];
   rowKey: string;
+  /**
+   * 是否隱藏「新增」按鈕（設 `true` 用於「新增全走另一流程」的頁面；
+   * 例：Modbus 設備管理走 Wizard 掃描批次匯入，手動新增會造成 dirty data）
+   */
+  hideAdd?: boolean;
+  /**
+   * 是否隱藏每列「刪除」按鈕（設 `true` 用於安全保護）
+   */
+  hideDelete?: boolean;
+  /**
+   * 是否隱藏每列「編輯」按鈕
+   */
+  hideEdit?: boolean;
+  /** 頁面 header 下的提示文字（例：引導用戶走另一流程） */
+  hintText?: React.ReactNode;
 }
 
 interface FormFieldDef {
@@ -19,7 +34,17 @@ interface FormFieldDef {
   required?: boolean;
 }
 
-export default function CrudTable({ title, apiPath, columns, formFields, rowKey }: CrudTableProps) {
+export default function CrudTable({
+  title,
+  apiPath,
+  columns,
+  formFields,
+  rowKey,
+  hideAdd = false,
+  hideDelete = false,
+  hideEdit = false,
+  hintText,
+}: CrudTableProps) {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -86,23 +111,35 @@ export default function CrudTable({ title, apiPath, columns, formFields, rowKey 
     width: 150,
     render: (_: any, record: any) => (
       <Space>
-        <Button icon={<EditOutlined />} size="small" onClick={() => handleEdit(record)} />
-        <Popconfirm title="確定刪除？" onConfirm={() => handleDelete(record[rowKey])}>
-          <Button icon={<DeleteOutlined />} size="small" danger />
-        </Popconfirm>
+        {!hideEdit && (
+          <Button icon={<EditOutlined />} size="small" onClick={() => handleEdit(record)} />
+        )}
+        {!hideDelete && (
+          <Popconfirm title="確定刪除？" onConfirm={() => handleDelete(record[rowKey])}>
+            <Button icon={<DeleteOutlined />} size="small" danger />
+          </Popconfirm>
+        )}
       </Space>
     ),
   };
+
+  // 若所有操作都被隱藏 → 不顯示操作欄
+  const showActionColumn = !hideEdit || !hideDelete;
 
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2>{title}</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
+        {!hideAdd && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
+        )}
       </div>
+      {hintText && (
+        <div style={{ marginBottom: 16 }}>{hintText}</div>
+      )}
 
       <Table
-        columns={[...columns, actionColumn]}
+        columns={showActionColumn ? [...columns, actionColumn] : columns}
         dataSource={data}
         rowKey={rowKey}
         loading={loading}
