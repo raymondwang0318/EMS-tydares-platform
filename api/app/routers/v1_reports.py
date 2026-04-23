@@ -35,8 +35,8 @@ _CAGG_BY_GRAN = {
 async def energy_report(
     granularity: str = Query("daily", pattern="^(15min|daily|monthly)$"),
     group_by: str = Query("device", pattern="^(device|ecsu)$"),
-    from_ts: str = Query(...),
-    to_ts: str = Query(...),
+    from_ts: datetime = Query(...),
+    to_ts: datetime = Query(...),
     parameter_code: str = Query("tot_input_active_energy"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -100,7 +100,7 @@ async def energy_report(
     ]
     return EnergyReportResponse(
         granularity=granularity, group_by=group_by,
-        from_ts=from_ts, to_ts=to_ts, points=points,
+        from_ts=from_ts.isoformat(), to_ts=to_ts.isoformat(), points=points,
     )
 
 
@@ -108,8 +108,8 @@ async def energy_report(
 async def thermal_report(
     mode: str = Query("latest", pattern="^(latest|trend)$"),
     device_id: str | None = None,
-    from_ts: str | None = None,
-    to_ts: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     if mode == "latest":
