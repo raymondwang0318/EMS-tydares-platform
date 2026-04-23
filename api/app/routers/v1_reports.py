@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -160,8 +162,8 @@ async def events_report(
     severity: str | None = None,
     edge_id: str | None = None,
     device_id: str | None = None,
-    from_ts: str | None = None,
-    to_ts: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
