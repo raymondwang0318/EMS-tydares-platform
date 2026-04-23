@@ -113,35 +113,43 @@ async def thermal_report(
     db: AsyncSession = Depends(get_db),
 ):
     if mode == "latest":
-        sql = """
+        where = ["parameter_code IN ('max_temp','min_temp','avg_temp')"]
+        params: dict[str, object] = {}
+        if device_id:
+            where.append("device_id = :dev")
+            params["dev"] = device_id
+        sql = f"""
             SELECT DISTINCT ON (device_id, parameter_code)
                    device_id, parameter_code, value, ts
             FROM trx_reading
-            WHERE parameter_code IN ('max_temp','min_temp','avg_temp')
-              AND (:dev IS NULL OR device_id = :dev)
+            WHERE {' AND '.join(where)}
             ORDER BY device_id, parameter_code, ts DESC
         """
-        rows = (await db.execute(text(sql), {"dev": device_id})).fetchall()
+        rows = (await db.execute(text(sql), params)).fetchall()
         items = [
             {
                 "device_id": r[0],
                 "parameter_code": r[1],
-                "value": float(r[2]),
-                "ts": r[3].isoformat(),
+                "value": float(r[2]) if r[2] is not None else None,
+                "ts": r[3].isoformat() if r[3] else None,
             }
             for r in rows
         ]
     else:
-        sql = """
+        if not from_ts or not to_ts:
+            raise HTTPException(status_code=400, detail="trend mode requires from_ts and to_ts")
+        where = ["bucket_day >= :from_ts", "bucket_day < :to_ts"]
+        params = {"from_ts": from_ts, "to_ts": to_ts}
+        if device_id:
+            where.append("device_id = :dev")
+            params["dev"] = device_id
+        sql = f"""
             SELECT bucket_day, device_id, parameter_code, daily_max, daily_min, daily_avg
             FROM cagg_thermal_daily
-            WHERE bucket_day >= :from_ts AND bucket_day < :to_ts
-              AND (:dev IS NULL OR device_id = :dev)
+            WHERE {' AND '.join(where)}
             ORDER BY bucket_day
         """
-        rows = (await db.execute(text(sql), {
-            "from_ts": from_ts, "to_ts": to_ts, "dev": device_id
-        })).fetchall()
+        rows = (await db.execute(text(sql), params)).fetchall()
         items = [
             {
                 "bucket_day": r[0].isoformat() if r[0] else "",
