@@ -56,6 +56,52 @@ async def list_edges(db: AsyncSession = Depends(get_db)):
     ]
 
 
+@router.post("/edges/{edge_id}/devices/bootstrap")
+async def bootstrap_placeholder_device(
+    edge_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """為 Admin UI Wizard 建立 placeholder device（scan 掃描佔位用）。
+
+    Wizard Step 1 若 edge 無既有 device，呼叫本 endpoint 取得 device_id
+    作為後續 scan command 的 FK target。scan 完成 confirm_devices 時
+    建真實 device 取代 placeholder。
+
+    回傳：{"device_id": "_placeholder_<8chars>"}
+
+    對應 T-P12-006 scope（M-PM-054 §三）；M-P10-014 §根因修復。
+    """
+    import uuid
+
+    edge = await db.get(EmsEdge, edge_id)
+    if not edge:
+        raise HTTPException(status_code=404, detail=f"edge {edge_id} not found")
+
+    device_id = f"_placeholder_{uuid.uuid4().hex[:8]}"
+
+    dev = EmsDevice(
+        device_id=device_id,
+        edge_id=edge_id,
+        device_kind="other",
+        display_name="掃描佔位（Wizard bootstrap）",
+        enabled=True,
+    )
+    db.add(dev)
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        edge_id=edge_id,
+        device_id=device_id,
+        actor="admin",
+        message="placeholder device created (wizard bootstrap)",
+        data_json={"source": "wizard_bootstrap"},
+    ))
+
+    await db.commit()
+    return {"device_id": device_id}
+
+
 # ========== /admin/devices ==========
 
 @router.get("/devices")
