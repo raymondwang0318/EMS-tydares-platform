@@ -84,6 +84,25 @@ function pickEnergyGranularity(range: [Dayjs, Dayjs]): '15min' | 'daily' | 'mont
 }
 
 /**
+ * 短期應急：依 device_id prefix 推導累計度數 metric。
+ *
+ * 依據 M-PM-075 §3.2（採信 M-P11-028 §2.2 SQL/curl 已驗證表）：
+ *   cpm12d-*  → energy_kwh_total  （CPM-12D 主電；avg 41.3 kWh 已驗）
+ *   cpm23-*   → energy_kwh_imp    （CPM-23；avg 0.8 kWh 已驗）
+ *   aem_drb-* → ma_ae_imp         （AEM-DRB main A 預設；avg 283.5 kWh 已驗）
+ *
+ * 老王「穩定運行優先；不大幅更動」原則 — 上線後若需架構統一，另開 ADR。
+ */
+function inferEnergyMetric(deviceId: string | undefined): string {
+  if (!deviceId) return 'energy_kwh_total';
+  if (deviceId.startsWith('cpm12d-')) return 'energy_kwh_total';
+  if (deviceId.startsWith('cpm23-')) return 'energy_kwh_imp';
+  if (deviceId.startsWith('aem_drb-')) return 'ma_ae_imp';
+  // 未知 prefix → fallback；後續可加新 device_kind support
+  return 'energy_kwh_total';
+}
+
+/**
  * V2-final 報表頁
  * 對接：/v1/reports/events（事件） / /v1/reports/energy（能量 MVP） / /v1/reports/thermal（熱像 MVP）
  *
@@ -180,13 +199,15 @@ export default function Reports() {
     const queriedRange: [Dayjs, Dayjs] = [range[0], range[1]];
     try {
       const gran = pickEnergyGranularity(queriedRange);
+      // 動態 metric mapping (M-PM-075 §3.1 / 修 M-P11-028 升報的 UI 預設 query mismatch)
+      const energyMetric = inferEnergyMetric(energyDevice);
       const res = await api.get('/reports/energy', {
         params: {
           granularity: gran,
           group_by: 'device',
           from_ts: queriedRange[0].toISOString(),
           to_ts: queriedRange[1].toISOString(),
-          parameter_code: 'tot_input_active_energy',
+          parameter_code: energyMetric,
         },
       });
       const allPoints: EnergyPoint[] = res.data?.points ?? [];
