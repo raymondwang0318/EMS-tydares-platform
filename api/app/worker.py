@@ -41,12 +41,38 @@ def _ts_from_ms(ts_ms: int | None, fallback: datetime) -> datetime:
 
 
 def _flatten_modbus(payload: dict, msg_ts: datetime, device_id: str) -> list[dict]:
-    """Modbus payload 格式示意：
-        {"circuits": {"Ma": {"voltage": 220.5, "active_power": 120.0}, "Ba1": {...}}}
-    或舊版扁平：
-        {"voltage": 220.5, "active_power": 120.0, "circuit_code": "Ma"}
+    """Modbus payload 展平。
+
+    V2-final IngestRecord 格式（ADR-026; P10 T-P10-007 對齊；正規路徑）:
+        {"metric": <code>, "value": <num>, "unit": <str>}
+
+    歷史格式（已 deprecated; 保留 fallback 以防舊資料 / 其他來源）:
+        - circuits 巢狀: {"circuits": {"Ma": {"voltage": 220.5}}}
+        - 扁平 (legacy): {"voltage": ..., "active_power": ..., "circuit_code": "Ma"}
+
+    Bug fix 2026-04-25 (T-P12-009, M-PM-071):
+        原 fallback 扁平邏輯 `for k, v in payload.items()` 把 dict key 名 "value"
+        當 parameter_code 寫入，導致 trx_reading 240K rows 全 parameter_code='value'。
+        新增 V2-final 分支優先處理 {"metric", "value"} pair；
+        legacy fallback 改為**僅 `circuit_code` 在 payload 時才走**（避免誤判 V2-final）。
     """
     rows: list[dict] = []
+
+    # V2-final IngestRecord (ADR-026; P10 T-P10-007 對齊；正規路徑)
+    if "metric" in payload and "value" in payload:
+        if isinstance(payload["value"], (int, float)):
+            rows.append({
+                "ts": msg_ts,
+                "device_id": device_id,
+                "circuit_code": payload.get("circuit_code", "Ma"),
+                "parameter_code": payload["metric"],
+                "value": float(payload["value"]),
+                "quality": 0,
+            })
+        # value 非 int/float 則靜默 skip
+        return rows
+
+    # 歷史 circuits 巢狀
     if isinstance(payload.get("circuits"), dict):
         for circuit_code, params in payload["circuits"].items():
             if not isinstance(params, dict):
@@ -62,8 +88,12 @@ def _flatten_modbus(payload: dict, msg_ts: datetime, device_id: str) -> list[dic
                     "value": float(value),
                     "quality": 0,
                 })
-    else:
-        circuit_code = payload.get("circuit_code", "Ma")
+        return rows
+
+    # 歷史扁平 fallback (legacy; deprecated)
+    # 守門：必須有 circuit_code 才走（避免誤判 V2-final 漏網 case）
+    if "circuit_code" in payload:
+        circuit_code = payload["circuit_code"]
         for param_code, value in payload.items():
             if param_code in ("circuit_code", "timestamp", "ts", "ts_ms"):
                 continue
