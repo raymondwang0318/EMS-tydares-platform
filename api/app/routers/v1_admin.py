@@ -362,3 +362,85 @@ async def list_electric_parameters(db: AsyncSession = Depends(get_db)):
         }
         for p in rows
     ]
+
+
+# ========== /admin/ir-devices ==========
+# T-S11C-001 AC 4 (M-PM-074 §3.2; M-PM-083 §3 confirmed)
+# IR device list（從 trx_reading device_id LIKE '811c_%' DISTINCT；T-P10-011 cutover phase9.1 後可用）
+# + ems_ir_device_metadata LEFT JOIN 取 display_name
+# 不註冊 ems_device（DR-028-05 多 edge 模板化暴力假設；trx_reading 為天然 register）
+
+@router.get("/ir-devices")
+async def list_ir_devices(db: AsyncSession = Depends(get_db)):
+    """List all 811C IR devices with metadata.
+
+    Source: trx_reading DISTINCT device_id LIKE '811c_%' (V2-final per-device cutover)
+    + LEFT JOIN ems_ir_device_metadata for display_name.
+
+    Returns: [{device_id, display_name (nullable), last_seen}]
+    """
+    result = await db.execute(text("""
+        SELECT
+          t.device_id,
+          m.display_name,
+          MAX(t.ts) AS last_seen
+        FROM trx_reading t
+        LEFT JOIN ems_ir_device_metadata m ON m.device_id = t.device_id
+        WHERE t.device_id LIKE '811c_%'
+        GROUP BY t.device_id, m.display_name
+        ORDER BY t.device_id
+    """))
+    return [
+        {
+            "device_id": row[0],
+            "display_name": row[1],
+            "last_seen": row[2].isoformat() if row[2] else None,
+        }
+        for row in result.fetchall()
+    ]
+
+
+@router.put("/ir-devices/{device_id}/label")
+async def upsert_ir_label(
+    device_id: str,
+    body: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upsert IR device label (display_name).
+
+    Body: {"display_name": str}  (nullable; "" 視為清除)
+
+    Returns: {device_id, display_name, updated_at}
+    """
+    display_name = body.get("display_name")
+    if display_name is not None and not isinstance(display_name, str):
+        raise HTTPException(status_code=422, detail="display_name must be string or null")
+
+    # 守門：device_id 必須以 '811c_' 起頭（避免污染表）
+    if not device_id.startswith("811c_"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"device_id must start with '811c_'; got: {device_id}"
+        )
+
+    await db.execute(text("""
+        INSERT INTO ems_ir_device_metadata (device_id, display_name, updated_at)
+        VALUES (:device_id, :display_name, NOW())
+        ON CONFLICT (device_id) DO UPDATE
+        SET display_name = EXCLUDED.display_name,
+            updated_at = NOW()
+    """), {"device_id": device_id, "display_name": display_name})
+
+    await db.commit()
+
+    result = await db.execute(text("""
+        SELECT device_id, display_name, updated_at
+        FROM ems_ir_device_metadata
+        WHERE device_id = :device_id
+    """), {"device_id": device_id})
+    row = result.fetchone()
+    return {
+        "device_id": row[0],
+        "display_name": row[1],
+        "updated_at": row[2].isoformat() if row[2] else None,
+    }
