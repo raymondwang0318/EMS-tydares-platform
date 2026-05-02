@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.database import engine
 from app.routers import (
     v1_admin,
+    v1_alerts,
     v1_commands,
     v1_edge,
     v1_health,
@@ -68,6 +69,7 @@ app.include_router(v1_ingest.router)
 app.include_router(v1_commands.router)
 app.include_router(v1_admin.router)
 app.include_router(v1_reports.router)
+app.include_router(v1_alerts.router)
 
 
 # --- Serve React UI static files (no nginx needed) ---
