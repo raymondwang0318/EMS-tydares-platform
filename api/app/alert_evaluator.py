@@ -227,8 +227,9 @@ async def _evaluate_condition(
             value = 0.0
 
         elif metric == 'hb_gap_sec':  # E2 Edge heartbeat gap
+            # ADR-026 V2-final 欄位：ems_edge_heartbeat 用 hb_ts（非 ts）
             row = (await db.execute(text("""
-                SELECT EXTRACT(EPOCH FROM (NOW() - MAX(ts))) AS gap
+                SELECT EXTRACT(EPOCH FROM (NOW() - MAX(hb_ts))) AS gap
                 FROM ems_edge_heartbeat WHERE edge_id = :edge_id
             """), {"edge_id": edge_id})).fetchone()
             value = float(row[0]) if row and row[0] is not None else None
