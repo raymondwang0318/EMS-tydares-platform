@@ -238,6 +238,12 @@ async def main():
     log.info("V2-final worker starting (ADR-026)")
     last_cleanup = time.monotonic()
 
+    # T-S11C-002 Phase β: alert evaluator loop（ADR-028 §8）
+    # 同 container 的 asyncio task；單 worker 部署 OK，多 worker 待轉 Redis state
+    from app.alert_evaluator import alert_evaluator_loop
+    alert_task = asyncio.create_task(alert_evaluator_loop(session_factory))
+    log.info("alert_evaluator launched (T-S11C-002 ADR-028)")
+
     try:
         while True:
             success, failed = await process_batch(session_factory)
@@ -252,6 +258,11 @@ async def main():
                 log.info("cleanup tick: deleted=%d old inbox rows", deleted)
                 last_cleanup = time.monotonic()
     finally:
+        alert_task.cancel()
+        try:
+            await alert_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await engine.dispose()
 
 
