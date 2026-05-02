@@ -142,8 +142,13 @@ async def list_alert_history(
     now = datetime.now(timezone.utc)
     if since is None:
         since = now - timedelta(days=7)
+    elif since.tzinfo is None:
+        # naive → 視為 UTC（避免與 tz-aware 比較 TypeError → 500）
+        since = since.replace(tzinfo=timezone.utc)
     if until is None:
         until = now
+    elif until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
     if since >= until:
         raise HTTPException(status_code=422, detail="since must be < until")
 
