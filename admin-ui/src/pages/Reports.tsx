@@ -11,6 +11,7 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import api from '../services/api';
+import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
 
 const { Title } = Typography;
 const { RangePicker } = DatePicker;
@@ -149,14 +150,27 @@ export default function Reports() {
       .finally(() => setDevicesLoading(false));
   }, []);
 
-  // 依 device_kind 分類（MVP：filter by kind 關鍵字）
+  // T-S11C-001 AC 6（M-PM-074 §4.2）：Thermal device 下拉**改從** `/v1/admin/ir-devices`
+  // 不再從 ems_device filter（811C 不註冊主表；老王明示）
+  const { data: irDevicesData, isLoading: irDevicesLoading } = useIrDevices();
+  const irDevices: IrDevice[] = irDevicesData ?? [];
+
+  // 依 device_kind 分類（Energy 仍從 ems_device modbus_meter）
   const energyDevices = useMemo(
     () => devices.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'),
     [devices],
   );
+
+  // Thermal Tab 設備清單：用 IrDevice 結構（device_id 為 `811c_<MAC>`；display_name 顯示優先）
+  // 依 T-S11C-001 AC 6：MAC 不出現前台；用 display_name 或「未命名 IR-N」
   const thermalDevices = useMemo(
-    () => devices.filter((d) => d.device_kind === 'thermal' || d.device_kind === 'thermal_camera'),
-    [devices],
+    () => irDevices.map((d, idx) => ({
+      device_id: d.device_id,
+      display_name: d.display_name,
+      label: irDisplayLabel(d, idx),
+      isUnnamed: !((d.display_name ?? '').trim()),
+    })),
+    [irDevices],
   );
 
   // 設備下拉預設選第一個（資料回來後）
@@ -165,6 +179,12 @@ export default function Reports() {
   }, [energyDevices, energyDevice]);
   useEffect(() => {
     if (thermalDevices.length && !thermalDevice) setThermalDevice(thermalDevices[0].device_id);
+  }, [thermalDevices, thermalDevice]);
+
+  // 用 thermalDevice 找到 displayLabel（chart title / tooltip 用；不顯示 MAC）
+  const thermalSelectedLabel = useMemo(() => {
+    const found = thermalDevices.find((d) => d.device_id === thermalDevice);
+    return found?.label ?? thermalDevice ?? '';
   }, [thermalDevices, thermalDevice]);
 
   // ========== Events ==========
@@ -438,16 +458,19 @@ export default function Reports() {
                 <Space style={{ marginBottom: 16 }} wrap>
                   {renderRange()}
                   <Select
-                    style={{ minWidth: 220 }}
-                    placeholder={devicesLoading ? '載入設備中…' : '選擇設備'}
+                    style={{ minWidth: 280 }}
+                    placeholder={irDevicesLoading ? '載入 IR 設備中…' : '選擇 IR 設備'}
                     value={thermalDevice}
                     onChange={setThermalDevice}
                     options={thermalDevices.map((d) => ({
                       value: d.device_id,
-                      label: `${d.device_id}${d.display_name ? ' · ' + d.display_name : ''}`,
+                      // T-S11C-001 AC 6：MAC 不出現；用 display_name 或「未命名 IR-N」
+                      label: d.isUnnamed ? (
+                        <Tag color="orange" style={{ marginRight: 0 }}>{d.label}</Tag>
+                      ) : d.label,
                     }))}
-                    notFoundContent={devicesLoading ? <Spin size="small" /> : '無熱像設備'}
-                    disabled={devicesLoading}
+                    notFoundContent={irDevicesLoading ? <Spin size="small" /> : '無 IR 設備（請先到「IR 標籤管理」頁標記設備）'}
+                    disabled={irDevicesLoading}
                   />
                   <Button
                     type="primary"
@@ -517,7 +540,7 @@ export default function Reports() {
                     </Card>
                   </Col>
                 </Row>
-                <Card title="溫度趨勢（daily）" size="small">
+                <Card title={`溫度趨勢（daily）— ${thermalSelectedLabel || '尚未選擇 IR 設備'}`} size="small">
                   {thermalLoading ? (
                     <div style={{ textAlign: 'center', padding: 60 }}>
                       <Spin />

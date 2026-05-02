@@ -10,6 +10,7 @@ import {
   DollarOutlined,
   BarChartOutlined,
   SettingOutlined,
+  FireOutlined,
 } from '@ant-design/icons';
 
 const { Sider, Content, Header } = Layout;
@@ -21,6 +22,7 @@ const menuItems = [
   { key: '/device-models', icon: <ApartmentOutlined />, label: '設備型號' },
   { key: '/ecsu', icon: <ThunderboltOutlined />, label: '計費單位 (ECSU)' },
   { key: '/billing', icon: <DollarOutlined />, label: '電價規則' },
+  { key: '/ir-devices', icon: <FireOutlined />, label: 'IR 標籤管理' },
   { key: '/reports', icon: <BarChartOutlined />, label: '報表' },
   { key: '/config', icon: <SettingOutlined />, label: '系統設定' },
 ];
