@@ -12,6 +12,13 @@ import {
 } from 'recharts';
 import api from '../services/api';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
+import {
+  useActiveAlerts,
+  computeDeviceHealth,
+  findEdgeDownAlerts,
+  type AlertActive,
+} from '../hooks/useAlerts';
+import AlertsHistory from './AlertsHistory';
 
 const { Title } = Typography;
 const { RangePicker } = DatePicker;
@@ -155,6 +162,16 @@ export default function Reports() {
   const { data: irDevicesData, isLoading: irDevicesLoading } = useIrDevices();
   const irDevices: IrDevice[] = irDevicesData ?? [];
 
+  // T-S11C-002 Phase γ-2 + γ-4：active alert 共用查詢（30 s polling；對齊 P12 worker tick）
+  const { data: activeAlertsData } = useActiveAlerts();
+  const activeAlerts: AlertActive[] = activeAlertsData ?? [];
+
+  // Phase γ-4 Edge-down banner 判斷（ADR-028 DR-028-05；M-PM-085 §3）
+  const edgeDownAlerts = useMemo(() => findEdgeDownAlerts(activeAlerts), [activeAlerts]);
+  // phase A 暴力假設：所有 811c_* 都歸同一 Edge（M-P12-023 §6.2 / ADR-028 DR-028-05）
+  // 取 down edge 的 edge_id（若多個 Edge down 取第一個；多 Edge 模板化為未來工作）
+  const suppressedEdgeId = edgeDownAlerts[0]?.edge_id ?? null;
+
   // 依 device_kind 分類（Energy 仍從 ems_device modbus_meter）
   const energyDevices = useMemo(
     () => devices.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'),
@@ -163,15 +180,22 @@ export default function Reports() {
 
   // Thermal Tab 設備清單：用 IrDevice 結構（device_id 為 `811c_<MAC>`；display_name 顯示優先）
   // 依 T-S11C-001 AC 6：MAC 不出現前台；用 display_name 或「未命名 IR-N」
+  // T-S11C-002 Phase γ-2：每筆附帶 health badge（綠 🟢 / 黃 🟡 / 橙 🟠 / 紅 🔴 / 灰 ⚪ Edge 抑制）
   const thermalDevices = useMemo(
     () => irDevices.map((d, idx) => ({
       device_id: d.device_id,
       display_name: d.display_name,
       label: irDisplayLabel(d, idx),
       isUnnamed: !((d.display_name ?? '').trim()),
+      health: computeDeviceHealth(d.device_id, activeAlerts, suppressedEdgeId),
     })),
-    [irDevices],
+    [irDevices, activeAlerts, suppressedEdgeId],
   );
+
+  // Thermal Tab 標題用顯示徽章
+  const thermalSelectedHealth = useMemo(() => {
+    return thermalDevices.find((d) => d.device_id === thermalDevice)?.health;
+  }, [thermalDevices, thermalDevice]);
 
   // 設備下拉預設選第一個（資料回來後）
   useEffect(() => {
@@ -455,19 +479,54 @@ export default function Reports() {
             label: '熱像 Thermal',
             children: (
               <>
+                {/* T-S11C-002 Phase γ-4 Edge-down banner（ADR-028 §3 抑制 UX）*/}
+                {edgeDownAlerts.length > 0 && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <span>
+                        ⚠️ Edge 主機{' '}
+                        <Tag color="red">
+                          {edgeDownAlerts.map((a) => a.edge_id).filter(Boolean).join(' / ') || '未知'}
+                        </Tag>{' '}
+                        失聯中（最早自{' '}
+                        {dayjs(
+                          edgeDownAlerts
+                            .map((a) => a.triggered_at)
+                            .sort()[0],
+                        ).format('HH:mm')}{' '}
+                        起）；下游 {irDevices.filter((d) => (d.display_name ?? '').trim()).length} 顆已標記 IR 設備暫停個別告警判斷
+                      </span>
+                    }
+                    description="此期間 IR 設備個別離線 / 推送 / 資料 / 時戳告警統一抑制，事件流 event_type='suppressed_by_edge_down' 留證；Edge 恢復後下一個 tick 自動恢復評估"
+                  />
+                )}
                 <Space style={{ marginBottom: 16 }} wrap>
                   {renderRange()}
                   <Select
-                    style={{ minWidth: 280 }}
+                    style={{ minWidth: 320 }}
                     placeholder={irDevicesLoading ? '載入 IR 設備中…' : '選擇 IR 設備'}
                     value={thermalDevice}
                     onChange={setThermalDevice}
+                    optionLabelProp="label"
                     options={thermalDevices.map((d) => ({
                       value: d.device_id,
                       // T-S11C-001 AC 6：MAC 不出現；用 display_name 或「未命名 IR-N」
-                      label: d.isUnnamed ? (
-                        <Tag color="orange" style={{ marginRight: 0 }}>{d.label}</Tag>
-                      ) : d.label,
+                      // T-S11C-002 Phase γ-2：附帶 health badge emoji + tooltip
+                      label: (
+                        <Space size={4}>
+                          <Tag color={d.health.color} style={{ marginRight: 0 }} title={d.health.tooltip}>
+                            {d.health.emoji} {d.health.label}
+                          </Tag>
+                          {d.isUnnamed ? (
+                            <Tag color="orange" style={{ marginRight: 0 }}>{d.label}</Tag>
+                          ) : (
+                            d.label
+                          )}
+                        </Space>
+                      ),
                     }))}
                     notFoundContent={irDevicesLoading ? <Spin size="small" /> : '無 IR 設備（請先到「IR 標籤管理」頁標記設備）'}
                     disabled={irDevicesLoading}
@@ -540,7 +599,19 @@ export default function Reports() {
                     </Card>
                   </Col>
                 </Row>
-                <Card title={`溫度趨勢（daily）— ${thermalSelectedLabel || '尚未選擇 IR 設備'}`} size="small">
+                <Card
+                  title={
+                    <Space>
+                      <span>溫度趨勢（daily）— {thermalSelectedLabel || '尚未選擇 IR 設備'}</span>
+                      {thermalSelectedHealth && (
+                        <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
+                          {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
+                        </Tag>
+                      )}
+                    </Space>
+                  }
+                  size="small"
+                >
                   {thermalLoading ? (
                     <div style={{ textAlign: 'center', padding: 60 }}>
                       <Spin />
@@ -569,6 +640,12 @@ export default function Reports() {
                 </Card>
               </>
             ),
+          },
+          {
+            // T-S11C-002 Phase γ-3 異常履歷 Tab（M-PM-088 §2.1 採納；ADR-028 §8.3）
+            key: 'alerts',
+            label: 'IR 異常履歷',
+            children: <AlertsHistory />,
           },
         ]}
       />

@@ -108,7 +108,7 @@ export default function IrDevices() {
         showIcon
         style={{ marginBottom: 16 }}
         message="811C 熱像 IR 設備清單（從 trx_reading 派生 — 不註冊主設備表）"
-        description="填寫名稱代號即納入 IR 健康監控（ADR-028）；MAC 僅作系統識別用，不出現在報表前台。"
+        description="填寫名稱代號（display_name）即納入健康監控；未命名設備不觸發離線告警（ADR-028 DR-028-02）。MAC 僅作系統識別用，不出現在報表前台。"
       />
       {error && (
         <Alert
