@@ -19,6 +19,7 @@ import {
   type AlertActive,
 } from '../hooks/useAlerts';
 import AlertsHistory from './AlertsHistory';
+import { FF_REPORTS_LINECHART_ENABLED } from '../lib/featureFlags';
 
 const { Title } = Typography;
 const { RangePicker } = DatePicker;
@@ -450,27 +451,39 @@ export default function Reports() {
                     </Card>
                   </Col>
                 </Row>
-                <Card title="用電趨勢" size="small">
-                  {energyLoading ? (
-                    <div style={{ textAlign: 'center', padding: 60 }}>
-                      <Spin />
-                    </div>
-                  ) : energyChartData.length === 0 ? (
-                    <Empty description={energyQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'} />
-                  ) : (
-                    <ResponsiveContainer width="100%" height={320}>
-                      <LineChart data={energyChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="ts" />
-                        <YAxis label={{ value: 'kWh', angle: -90, position: 'insideLeft' }} />
-                        <Tooltip
-                          formatter={(v) => [typeof v === 'number' ? `${v.toFixed(3)} kWh` : '—', '用電']}
-                        />
-                        <Line type="monotone" dataKey="kWh" stroke="#4caf50" strokeWidth={2} dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                </Card>
+                {/* T-Reports-001 §AC 2.1：折線圖 feature flag 隱藏；保留代碼供分析比對啟用 */}
+                {FF_REPORTS_LINECHART_ENABLED && (
+                  <Card title="用電趨勢（分析比對）" size="small">
+                    {energyLoading ? (
+                      <div style={{ textAlign: 'center', padding: 60 }}>
+                        <Spin />
+                      </div>
+                    ) : energyChartData.length === 0 ? (
+                      <Empty description={energyQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'} />
+                    ) : (
+                      <ResponsiveContainer width="100%" height={320}>
+                        <LineChart data={energyChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="ts" />
+                          <YAxis label={{ value: 'kWh', angle: -90, position: 'insideLeft' }} />
+                          <Tooltip
+                            formatter={(v) => [typeof v === 'number' ? `${v.toFixed(3)} kWh` : '—', '用電']}
+                          />
+                          <Line type="monotone" dataKey="kWh" stroke="#4caf50" strokeWidth={2} dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    )}
+                  </Card>
+                )}
+                {!FF_REPORTS_LINECHART_ENABLED && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginTop: 16 }}
+                    message="6 項用電履歷列表開發中（T-Reports-001）"
+                    description="折線圖已隱藏（業主分析比對需求可設 VITE_FF_REPORTS_LINECHART_ENABLED=true 啟用）；履歷列表（電壓/頻率/電流/總功率/功率因數/累積用電 6 項）+ 視角切換（依設備/依迴路）+ granularity selector（5min 起）正在等 backend API 擴充。"
+                  />
+                )}
               </>
             ),
           },
@@ -599,45 +612,66 @@ export default function Reports() {
                     </Card>
                   </Col>
                 </Row>
-                <Card
-                  title={
-                    <Space>
-                      <span>溫度趨勢（daily）— {thermalSelectedLabel || '尚未選擇 IR 設備'}</span>
-                      {thermalSelectedHealth && (
-                        <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
-                          {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
-                        </Tag>
-                      )}
-                    </Space>
-                  }
-                  size="small"
-                >
-                  {thermalLoading ? (
-                    <div style={{ textAlign: 'center', padding: 60 }}>
-                      <Spin />
-                    </div>
-                  ) : thermalChartData.length === 0 ? (
-                    <Empty description={thermalQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'} />
-                  ) : (
-                    <ResponsiveContainer width="100%" height={320}>
-                      <LineChart data={thermalChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="ts" />
-                        <YAxis label={{ value: '°C', angle: -90, position: 'insideLeft' }} />
-                        <Tooltip
-                          formatter={(v, name) => [
-                            typeof v === 'number' ? `${v.toFixed(1)} °C` : '—',
-                            name,
-                          ]}
-                        />
-                        <Legend />
-                        <Line type="monotone" dataKey="avg" name="平均" stroke="#4caf50" strokeWidth={2} dot />
-                        <Line type="monotone" dataKey="max" name="最高" stroke="#d32f2f" strokeWidth={1} dot />
-                        <Line type="monotone" dataKey="min" name="最低" stroke="#1976d2" strokeWidth={1} dot />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                </Card>
+                {/* T-Reports-001 §AC 2.1：折線圖 feature flag 隱藏；保留代碼供分析比對啟用 */}
+                {FF_REPORTS_LINECHART_ENABLED && (
+                  <Card
+                    title={
+                      <Space>
+                        <span>溫度趨勢（daily 分析比對）— {thermalSelectedLabel || '尚未選擇 IR 設備'}</span>
+                        {thermalSelectedHealth && (
+                          <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
+                            {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
+                          </Tag>
+                        )}
+                      </Space>
+                    }
+                    size="small"
+                  >
+                    {thermalLoading ? (
+                      <div style={{ textAlign: 'center', padding: 60 }}>
+                        <Spin />
+                      </div>
+                    ) : thermalChartData.length === 0 ? (
+                      <Empty description={thermalQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'} />
+                    ) : (
+                      <ResponsiveContainer width="100%" height={320}>
+                        <LineChart data={thermalChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="ts" />
+                          <YAxis label={{ value: '°C', angle: -90, position: 'insideLeft' }} />
+                          <Tooltip
+                            formatter={(v, name) => [
+                              typeof v === 'number' ? `${v.toFixed(1)} °C` : '—',
+                              name,
+                            ]}
+                          />
+                          <Legend />
+                          <Line type="monotone" dataKey="avg" name="平均" stroke="#4caf50" strokeWidth={2} dot />
+                          <Line type="monotone" dataKey="max" name="最高" stroke="#d32f2f" strokeWidth={1} dot />
+                          <Line type="monotone" dataKey="min" name="最低" stroke="#1976d2" strokeWidth={1} dot />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    )}
+                  </Card>
+                )}
+                {!FF_REPORTS_LINECHART_ENABLED && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginTop: 16 }}
+                    message={
+                      <Space>
+                        <span>熱像履歷列表開發中（T-Reports-001）</span>
+                        {thermalSelectedHealth && (
+                          <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
+                            {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
+                          </Tag>
+                        )}
+                      </Space>
+                    }
+                    description="折線圖已隱藏（業主分析比對需求可設 VITE_FF_REPORTS_LINECHART_ENABLED=true 啟用）；熱像履歷列表（max_temp/min_temp/avg_temp/max_coord）+ granularity selector（5min 起）正在等 backend API 擴充（cagg_thermal_5min）。當前最高/最低/平均溫摘要仍可參考上方 Statistic 卡。"
+                  />
+                )}
               </>
             ),
           },
