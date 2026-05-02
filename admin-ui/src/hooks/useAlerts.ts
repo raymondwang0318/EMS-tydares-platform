@@ -57,17 +57,24 @@ export interface AlertActive {
   ack_note: string | null;
 }
 
-/** GET /v1/alerts/history 回傳一筆 */
+/**
+ * GET /v1/alerts/history 回傳一筆。
+ *
+ * 採證對齊（M-P12-024 §6.3）：
+ * - alert_id：對應 active row 的 id；cross-cutting 抑制事件無對應 active row 時回 0（非 null）
+ * - 不含 rule_name（與 active endpoint 不同）；UI 由 rule_id + message 推；可選擇 active map lookup
+ * - value：history 自身欄位（非 last_value）；suppressed 事件回 null
+ */
 export interface AlertHistoryEvent {
   ts: string;
-  alert_id: number | null;
+  alert_id: number;
   rule_id: number;
-  rule_name: string;
   event_type: AlertEventType;
   device_id: string | null;
   edge_id: string | null;
-  severity: AlertSeverity;
+  value: number | null;
   message: string | null;
+  severity: AlertSeverity;
   actor: string | null;
   note: string | null;
 }

@@ -161,6 +161,16 @@ export default function AlertsHistory() {
     return m;
   }, [irDevicesData]);
 
+  // rule_id → rule_name 對照（history endpoint 不回 rule_name；用 active 反查）
+  // 限制：rule 從未 active 過則 fallback 顯示 rule_id；可接受
+  const ruleNameMap = useMemo(() => {
+    const m = new Map<number, string>();
+    activeAlerts.forEach((a) => m.set(a.rule_id, a.rule_name));
+    return m;
+  }, [activeAlerts]);
+  const ruleLabel = (rule_id: number) =>
+    ruleNameMap.get(rule_id) ?? `規則 #${rule_id}`;
+
   const ackMutation = useAckAlert();
 
   // 按 scope 過濾（前端側；後端 endpoint 已支援 device_id/edge_id 但 IR 群組需 prefix）
@@ -317,9 +327,9 @@ export default function AlertsHistory() {
     },
     {
       title: '規則',
-      dataIndex: 'rule_name',
-      key: 'rule_name',
+      key: 'rule',
       width: 180,
+      render: (_, rec) => ruleLabel(rec.rule_id),
     },
     {
       title: '目標',
@@ -491,7 +501,7 @@ export default function AlertsHistory() {
           <ActiveDetailPanel data={detail.data as AlertActive} />
         )}
         {detail && detail.type === 'history' && (
-          <HistoryDetailPanel data={detail.data as AlertHistoryEvent} />
+          <HistoryDetailPanel data={detail.data as AlertHistoryEvent} ruleLabel={ruleLabel} />
         )}
         {detail && (detail.data.device_id ?? '').startsWith('811c_') && <LedHintPanel />}
       </Modal>
@@ -583,7 +593,13 @@ function ActiveDetailPanel({ data }: { data: AlertActive }) {
   );
 }
 
-function HistoryDetailPanel({ data }: { data: AlertHistoryEvent }) {
+function HistoryDetailPanel({
+  data,
+  ruleLabel,
+}: {
+  data: AlertHistoryEvent;
+  ruleLabel: (rule_id: number) => string;
+}) {
   return (
     <Descriptions bordered column={1} size="small">
       <Descriptions.Item label="時間">
@@ -592,9 +608,11 @@ function HistoryDetailPanel({ data }: { data: AlertHistoryEvent }) {
       <Descriptions.Item label="事件">
         <Tag color={eventTypeColor(data.event_type)}>{eventTypeLabel(data.event_type)}</Tag>
       </Descriptions.Item>
-      <Descriptions.Item label="alert_id">{data.alert_id ?? '—'}</Descriptions.Item>
+      <Descriptions.Item label="alert_id">
+        {data.alert_id === 0 ? <Text type="secondary">— (cross-cutting)</Text> : data.alert_id}
+      </Descriptions.Item>
       <Descriptions.Item label="規則">
-        {data.rule_name} (id={data.rule_id})
+        {ruleLabel(data.rule_id)} (id={data.rule_id})
       </Descriptions.Item>
       <Descriptions.Item label="嚴重度">
         <Tag color={severityColor(data.severity)}>{severityLabel(data.severity)}</Tag>
@@ -604,6 +622,7 @@ function HistoryDetailPanel({ data }: { data: AlertHistoryEvent }) {
         {data.edge_id && <div>edge: {data.edge_id}</div>}
         {!data.device_id && !data.edge_id && '—'}
       </Descriptions.Item>
+      <Descriptions.Item label="觸發值">{data.value ?? '—'}</Descriptions.Item>
       <Descriptions.Item label="訊息">{data.message ?? '—'}</Descriptions.Item>
       <Descriptions.Item label="actor / note">
         {data.actor ? (
