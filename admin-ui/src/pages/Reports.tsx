@@ -292,11 +292,14 @@ export default function Reports() {
     [],
   );
 
-  // AEM 24 路 circuit 選項（ba1~ba12 / bb1~bb12）
+  // AEM 26 路選項（主 A/B 各 1 + 子迴路各 12 = 26）
+  // 老王 2026-05-04 chat：「Ma & Mb 也必須列入迴路選項之中」
   const aemCircuitOptions = useMemo(
     () => {
       const opts: { value: string; label: string }[] = [];
+      opts.push({ value: 'ma', label: 'ma（主 A 排）' });
       for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}（A 排第 ${i} 路）` });
+      opts.push({ value: 'mb', label: 'mb（主 B 排）' });
       for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}（B 排第 ${i} 路）` });
       return opts;
     },
@@ -695,14 +698,14 @@ export default function Reports() {
                   </Card>
                 )}
                 {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
-                {/* AEM「依設備」視角：無 device-level metric → 提示切換「依迴路」*/}
+                {/* AEM「依設備」視角：默認顯示主 A 排（ma_*）6 metric；註腳提示 ma/mb 兩排 */}
                 {energyDeviceIsAem && effectiveViewMode === 'device' && (
                   <Alert
-                    type="warning"
+                    type="info"
                     showIcon
                     style={{ marginTop: 16 }}
-                    message="AEM-DRB1 為 24 路盤式電表"
-                    description="本設備為 per-circuit 結構（24 個迴路：ba1~ba12 / bb1~bb12）；無 device-level 電壓 / 頻率 / 總功率 metric。請切換至「依迴路」並選擇迴路以檢視 6 項用電（電壓/頻率為設備級無資料；電流/總功率/功率因數/累積用電 4 項可用）。"
+                    message="AEM-DRB1 為 24 路盤式電表（A 排 ba1~ba12 + B 排 bb1~bb12）"
+                    description="「依設備」視角默認顯示主 A 排 (ma_*) 6 metric；切「依迴路」可選 ba1~ba12（繼承 ma_v_avg / ma_freq）或 bb1~bb12（繼承 mb_v_avg / mb_freq）。"
                   />
                 )}
                 {/* AEM「依迴路」未選 circuit：提示 */}
@@ -712,11 +715,11 @@ export default function Reports() {
                     showIcon
                     style={{ marginTop: 16 }}
                     message="請選擇迴路"
-                    description="AEM-DRB1 共 24 個迴路（ba1~ba12 / bb1~bb12）；選擇後按「查詢」載入該迴路履歷。"
+                    description="AEM-DRB1 共 24 個迴路（ba1~ba12 → 繼承 ma_v_avg / ma_freq；bb1~bb12 → 繼承 mb_v_avg / mb_freq）；選擇後按「查詢」載入該迴路履歷。"
                   />
                 )}
-                {/* CPM 類 + AEM 已選迴路：HistoryTable 6 column */}
-                {(!energyDeviceIsAem || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
+                {/* CPM 類 + AEM 任何視角（依設備 ma_* / 依迴路已選 circuit）：HistoryTable 6 column */}
+                {(!energyDeviceIsAem || effectiveViewMode === 'device' || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
                   <HistoryTable
                     columns={energyColumns}
                     data={energyHistoryRows}

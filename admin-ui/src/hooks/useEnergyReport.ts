@@ -68,7 +68,11 @@ export function useEnergyReport(filter: EnergyReportFilter | null) {
       const params = new URLSearchParams();
       params.append('granularity', filter.granularity);
       filter.parameter_codes.forEach((c) => params.append('parameter_codes', c));
-      if (filter.circuit_id) params.append('circuit_id', filter.circuit_id);
+      // 故意不傳 circuit_id（即使 filter 有提供）：
+      //   backend circuit_id 走 prefix LIKE，會把 ma_v_avg / ma_freq 等
+      //   主迴路 metric 排除（不 match 'ba1%'）→ AEM 依迴路視角的電壓/頻率消失
+      //   既然 parameter_codes 已 explicit 列出所有要的 metric，circuit_id 多餘
+      //   參考 [[T-Reports-001]] AEM 視角設計（ba→ma / bb→mb 主迴路繼承）
       filter.device_ids?.forEach((d) => params.append('device_ids', d));
       params.append('from_ts', filter.from_ts);
       params.append('to_ts', filter.to_ts);
@@ -104,10 +108,14 @@ export interface EnergyMetricMapping {
 
 /**
  * 由 device_id 推斷 mapping：
- *   - cpm12d-* → CPM-12D 完整 6 metric
- *   - cpm23-*  → CPM-23 完整 6 metric（voltage 用 voltage_ll_avg 線電壓）
- *   - aem_drb-* + circuit_id（依迴路）→ ba{N}_* 4 metric（voltage/frequency 設備級無；null）
- *   - aem_drb-* 無 circuit_id（依設備）→ 全 null（無 device-level metric；UI 顯 placeholder）
+ *   - cpm12d 系列 → CPM-12D 完整 6 metric
+ *   - cpm23 系列  → CPM-23 完整 6 metric（voltage 用 voltage_ll_avg 線電壓）
+ *   - aem_drb 系列 + circuit_id（依迴路）→ 主迴路電壓/頻率（ma 系列 / mb 系列）+ 子迴路電流/總功率/功率因數/累積用電
+ *     · ba{N}（A 排子迴路）→ voltage=ma_v_avg / frequency=ma_freq / 子迴路 ba{N}_i/_p/_pf/_ae_imp
+ *     · bb{N}（B 排子迴路）→ voltage=mb_v_avg / frequency=mb_freq / 子迴路 bb{N}_i/_p/_pf/_ae_imp
+ *   - aem_drb 系列 無 circuit_id（依設備）→ 主 A 排 6 metric（後續可加 ma/mb 排切換）
+ *
+ * 老王 2026-05-04 chat 校正：「沒有將主迴路的電壓/頻率帶入」→ 子迴路繼承對應主迴路 ma 系列 / mb 系列
  */
 export function inferEnergyMapping(
   deviceId: string | undefined,
@@ -144,18 +152,55 @@ export function inferEnergyMapping(
     };
   }
   if (deviceId.startsWith('aem_drb-') && circuitId) {
-    // AEM-DRB1 依迴路：ba{N}_i / ba{N}_p / ba{N}_pf / ba{N}_ae_imp
-    // 注意：電壓 / 頻率為設備級；AEM 無 device-level voltage / frequency metric → null
+    // AEM-DRB1 依迴路：
+    //   - circuitId='ma' → 主 A 排完整 6 metric（ma_*）
+    //   - circuitId='mb' → 主 B 排完整 6 metric（mb_*）
+    //   - circuitId='ba{N}' → 主 A 電壓/頻率 + 子迴路 ba{N}_* 4 metric
+    //   - circuitId='bb{N}' → 主 B 電壓/頻率 + 子迴路 bb{N}_* 4 metric
+    // 老王 2026-05-04 chat：「ba* 子迴路帶入 ma；bb* 子迴路帶入 mb」+「Ma & Mb 也必須列入迴路選項」
+    if (circuitId === 'ma') {
+      return {
+        voltage: 'ma_v_avg',
+        frequency: 'ma_freq',
+        current: 'ma_i_avg',
+        power_total: 'ma_p_sum',
+        power_factor: 'ma_pf',
+        energy_kwh: 'ma_ae_imp',
+      };
+    }
+    if (circuitId === 'mb') {
+      return {
+        voltage: 'mb_v_avg',
+        frequency: 'mb_freq',
+        current: 'mb_i_avg',
+        power_total: 'mb_p_sum',
+        power_factor: 'mb_pf',
+        energy_kwh: 'mb_ae_imp',
+      };
+    }
+    // 子迴路 ba{N} / bb{N}：繼承對應主迴路電壓/頻率 + 子迴路 4 metric
+    const main = circuitId.startsWith('bb') ? 'mb' : 'ma';
     return {
-      voltage: null,
-      frequency: null,
+      voltage: `${main}_v_avg`,
+      frequency: `${main}_freq`,
       current: `${circuitId}_i`,
       power_total: `${circuitId}_p`,
       power_factor: `${circuitId}_pf`,
       energy_kwh: `${circuitId}_ae_imp`,
     };
   }
-  // AEM 依設備（無 circuit_id）或未知 device_kind → 全 null
+  if (deviceId.startsWith('aem_drb-')) {
+    // AEM-DRB1 依設備：默認主 A 排（ma_*）6 metric；老王可切「依迴路」+ ma/mb 切換
+    return {
+      voltage: 'ma_v_avg',
+      frequency: 'ma_freq',
+      current: 'ma_i_avg',
+      power_total: 'ma_p_sum',
+      power_factor: 'ma_pf',
+      energy_kwh: 'ma_ae_imp',
+    };
+  }
+  // 未知 device_kind → 全 null
   return {
     voltage: null,
     frequency: null,
