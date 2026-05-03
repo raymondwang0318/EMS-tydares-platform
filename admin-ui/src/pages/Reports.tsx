@@ -73,6 +73,11 @@ interface ThermalPoint {
   ts?: string;
   device_id: string;
   parameter_code: string;
+  // mode=history（M-P12-026）統一 schema：max_value / min_value / avg_value
+  max_value?: number | null;
+  min_value?: number | null;
+  avg_value?: number | null;
+  // mode=trend（cagg_thermal_daily 既有；保留向下相容）
   daily_max?: number | null;
   daily_min?: number | null;
   daily_avg?: number | null;
@@ -318,13 +323,14 @@ export default function Reports() {
     [],
   );
 
-  // T-Reports-001 §AC 2.4 thermal granularity options（同 energy 穩定 reference；5min/15min/1hr 待 backend cagg_thermal_5min）
+  // T-Reports-001 §AC 2.4 thermal granularity options
+  // M-P12-026 thermal endpoint 已支援 mode=history granularity 5min/15min/1hr/1day（M-PM-101 §四 Bug 5 修；解封）
   const thermalGranularityOptions = useMemo(
     () => [
-      { value: '5min', label: '5min（待 backend）', disabled: true },
-      { value: '15min', label: '15min（待 backend）', disabled: true },
-      { value: '1hr', label: '1hr（待 backend）', disabled: true },
-      { value: '1day', label: '1day（既有）' },
+      { value: '5min', label: '5min' },
+      { value: '15min', label: '15min' },
+      { value: '1hr', label: '1hr' },
+      { value: '1day', label: '1day' },
     ],
     [],
   );
@@ -394,14 +400,18 @@ export default function Reports() {
     setThermalError(undefined);
     const queriedRange: [Dayjs, Dayjs] = [range[0], range[1]];
     try {
-      const res = await api.get('/reports/thermal', {
-        params: {
-          mode: 'trend',
-          device_id: thermalDevice,
-          from_ts: queriedRange[0].toISOString(),
-          to_ts: queriedRange[1].toISOString(),
-        },
-      });
+      // M-P12-026 thermal endpoint mode=history + granularity 5min/15min/1hr/1day
+      // FastAPI Query(List[str]) repeat-key 序列化（同 useEnergyReport pattern）
+      const params = new URLSearchParams();
+      params.append('mode', 'history');
+      params.append('granularity', thermalGranularity);
+      ['max_temp', 'min_temp', 'avg_temp'].forEach((c) =>
+        params.append('parameter_codes', c),
+      );
+      params.append('device_ids', thermalDevice);
+      params.append('from_ts', queriedRange[0].toISOString());
+      params.append('to_ts', queriedRange[1].toISOString());
+      const res = await api.get(`/reports/thermal?${params.toString()}`);
       const items: ThermalPoint[] = res.data?.items ?? [];
       setThermalPoints(items);
       setThermalQueriedRange(queriedRange);
@@ -466,28 +476,33 @@ export default function Reports() {
     ? thermalAlertHistoryData ?? []
     : [];
 
-  // T-Reports-001 §AC 2.4：thermal HistoryTable rows
-  // 從 thermalPoints group by bucket_day；attach events floor 到 day
+  // T-Reports-001 §AC 2.4 + Bug 5 修：thermal HistoryTable rows
+  // M-P12-026 mode=history schema：max_value / min_value / avg_value（5min/15min/1hr/1day 統一）
+  // group by ts（5min/15min/1hr 走 trx_reading bucket；1day 走 cagg；ts/bucket_day 都接受）
   const thermalHistoryRows = useMemo<HistoryRow[]>(() => {
     if (!thermalPoints.length) return [];
 
-    // group thermalPoints by bucket_day → 每 day 收 max/min/avg
-    const byDay = new Map<
+    // group thermalPoints by ts → 每 bucket 收 max/min/avg
+    const byBucket = new Map<
       string,
       { ts: string; daily_max: number | null; daily_min: number | null; daily_avg: number | null }
     >();
     thermalPoints.forEach((p) => {
-      const key = p.bucket_day ?? p.ts ?? '';
+      const key = p.ts ?? p.bucket_day ?? '';
       if (!key) return;
       const existing =
-        byDay.get(key) ?? { ts: key, daily_max: null, daily_min: null, daily_avg: null };
-      if (p.parameter_code === 'max_temp' && p.daily_max != null) existing.daily_max = p.daily_max;
-      if (p.parameter_code === 'min_temp' && p.daily_min != null) existing.daily_min = p.daily_min;
-      if (p.parameter_code === 'avg_temp' && p.daily_avg != null) existing.daily_avg = p.daily_avg;
-      byDay.set(key, existing);
+        byBucket.get(key) ?? { ts: key, daily_max: null, daily_min: null, daily_avg: null };
+      // mode=history 用 max_value / min_value / avg_value；mode=trend 用 daily_*（fallback）
+      const v_max = p.max_value ?? p.daily_max;
+      const v_min = p.min_value ?? p.daily_min;
+      const v_avg = p.avg_value ?? p.daily_avg;
+      if (p.parameter_code === 'max_temp' && v_max != null) existing.daily_max = v_max;
+      if (p.parameter_code === 'min_temp' && v_min != null) existing.daily_min = v_min;
+      if (p.parameter_code === 'avg_temp' && v_avg != null) existing.daily_avg = v_avg;
+      byBucket.set(key, existing);
     });
 
-    // alert events group by day floor（YYYY-MM-DD 對齊）
+    // alert events group by day floor（事件 marker 對齊；非 5min granularity 也可看 day-level events）
     const eventsByDay = new Map<string, AlertHistoryEvent[]>();
     thermalAlertHistory.forEach((e) => {
       const dayKey = dayjs(e.ts).format('YYYY-MM-DD');
@@ -496,7 +511,7 @@ export default function Reports() {
       eventsByDay.set(dayKey, arr);
     });
 
-    return Array.from(byDay.values()).map((row) => {
+    return Array.from(byBucket.values()).map((row) => {
       const dayKey = dayjs(row.ts).format('YYYY-MM-DD');
       return {
         ts: row.ts,
@@ -959,7 +974,7 @@ export default function Reports() {
                         options={thermalGranularityOptions}
                       />
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        ⓘ 5min/15min/1hr 待 P12 backend 擴 cagg_thermal_5min（[[T-Reports-001]] §AC 1.4 升報）
+                        ⓘ 5min/15min/1hr 走 trx_reading + time_bucket；1day 走 cagg_thermal_daily（M-P12-026 backend 擴 mode=history）
                       </Text>
                     </Space>
                     <HistoryTable
