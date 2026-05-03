@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Card, Col, DatePicker, Empty, Row, Select, Space, Spin,
+  Alert, Button, Card, Col, DatePicker, Empty, Radio, Row, Select, Space, Spin,
   Statistic, Table, Tabs, Tag, Typography, message,
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
@@ -27,6 +27,12 @@ import HistoryTable, {
   type HistoryColumnSpec,
   type HistoryRow,
 } from '../components/HistoryTable';
+import {
+  useEnergyReport,
+  inferEnergyMapping,
+  mappingToParameterCodes,
+  energyPointsToRows,
+} from '../hooks/useEnergyReport';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -145,6 +151,11 @@ export default function Reports() {
   const [energyLoading, setEnergyLoading] = useState(false);
   const [energyError, setEnergyError] = useState<string | undefined>();
   const [energyQueriedRange, setEnergyQueriedRange] = useState<[Dayjs, Dayjs] | null>(null);
+  // T-Reports-001 §AC 2.3 Energy Tab 新狀態
+  const [energyGranularity, setEnergyGranularity] = useState<Granularity>('15min');
+  const [energyViewMode, setEnergyViewMode] = useState<'device' | 'circuit'>('device');
+  const [energyCircuitId, setEnergyCircuitId] = useState<string | undefined>();
+  const [energyHistoryRange, setEnergyHistoryRange] = useState<[Dayjs, Dayjs] | null>(null);
 
   // Thermal Tab
   const [thermalDevice, setThermalDevice] = useState<string | undefined>();
@@ -221,6 +232,76 @@ export default function Reports() {
     const found = thermalDevices.find((d) => d.device_id === thermalDevice);
     return found?.label ?? thermalDevice ?? '';
   }, [thermalDevices, thermalDevice]);
+
+  // ─────────────────────────────────────────────────────────────
+  // T-Reports-001 §AC 2.3 Energy Tab — 6 metric × granularity × 視角切換
+  // ─────────────────────────────────────────────────────────────
+
+  // 是否 AEM 設備（決定是否顯示視角 toggle + circuit 下拉）
+  const energyDeviceIsAem = (energyDevice ?? '').startsWith('aem_drb-');
+  // 有效視角（CPM 類強制 device；AEM 用使用者選擇）
+  const effectiveViewMode = energyDeviceIsAem ? energyViewMode : 'device';
+
+  // 6 metric mapping per device + 視角 + circuit
+  const energyMapping = useMemo(
+    () =>
+      inferEnergyMapping(
+        energyDevice,
+        effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
+      ),
+    [energyDevice, effectiveViewMode, energyCircuitId],
+  );
+
+  // 6 metric → parameter_codes（送 backend）
+  const energyParamCodes = useMemo(
+    () => mappingToParameterCodes(energyMapping),
+    [energyMapping],
+  );
+
+  // useEnergyReport hook filter（按查詢按鈕後 set energyHistoryRange 觸發 fetch）
+  const energyReportFilter = useMemo(() => {
+    if (!energyDevice || !energyHistoryRange || energyParamCodes.length === 0) return null;
+    return {
+      granularity: energyGranularity,
+      parameter_codes: energyParamCodes,
+      circuit_id: effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
+      device_ids: [energyDevice],
+      from_ts: energyHistoryRange[0].toISOString(),
+      to_ts: energyHistoryRange[1].toISOString(),
+    };
+  }, [energyDevice, energyHistoryRange, energyParamCodes, energyGranularity, effectiveViewMode, energyCircuitId]);
+
+  const { data: energyReportData, isLoading: energyHistoryLoading } = useEnergyReport(
+    energyReportFilter,
+  );
+  const energyHistoryRows: HistoryRow[] = useMemo(() => {
+    if (!energyReportData) return [];
+    return energyPointsToRows(energyReportData.points, energyMapping);
+  }, [energyReportData, energyMapping]);
+
+  // 6 column 老王指定順序（[[M-PM-092]] §一 採納版）
+  const energyColumns: HistoryColumnSpec<HistoryRow>[] = useMemo(
+    () => [
+      { key: 'voltage', title: '電壓', unit: 'V', precision: 1, width: 90 },
+      { key: 'frequency', title: '頻率', unit: 'Hz', precision: 2, width: 90 },
+      { key: 'current', title: '電流', unit: 'A', precision: 2, width: 90 },
+      { key: 'power_total', title: '總功率', unit: 'W', precision: 0, width: 100 },
+      { key: 'power_factor', title: '功率因數', precision: 3, width: 100 },
+      { key: 'energy_kwh', title: '累積用電', unit: 'kWh', precision: 3, width: 110 },
+    ],
+    [],
+  );
+
+  // AEM 24 路 circuit 選項（ba1~ba12 / bb1~bb12）
+  const aemCircuitOptions = useMemo(
+    () => {
+      const opts: { value: string; label: string }[] = [];
+      for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}（A 排第 ${i} 路）` });
+      for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}（B 排第 ${i} 路）` });
+      return opts;
+    },
+    [],
+  );
 
   // ========== Events ==========
   const fetchEvents = async () => {
@@ -491,7 +572,15 @@ export default function Reports() {
                     style={{ minWidth: 220 }}
                     placeholder={devicesLoading ? '載入設備中…' : '選擇設備'}
                     value={energyDevice}
-                    onChange={setEnergyDevice}
+                    onChange={(v) => {
+                      setEnergyDevice(v);
+                      // 切設備時 reset circuit / 視角（若新設備非 AEM 則強制 device 視角）
+                      const isAem = (v ?? '').startsWith('aem_drb-');
+                      if (!isAem) {
+                        setEnergyViewMode('device');
+                        setEnergyCircuitId(undefined);
+                      }
+                    }}
                     options={energyDevices.map((d) => ({
                       value: d.device_id,
                       label: `${d.device_id}${d.display_name ? ' · ' + d.display_name : ''}`,
@@ -499,11 +588,51 @@ export default function Reports() {
                     notFoundContent={devicesLoading ? <Spin size="small" /> : '無電表設備'}
                     disabled={devicesLoading}
                   />
+                  {/* T-Reports-001 §AC 2.3：granularity selector（5min 起；M-P12-025 backend 擴後 enable 全選項）*/}
+                  <Select
+                    style={{ width: 120 }}
+                    value={energyGranularity}
+                    onChange={(v) => setEnergyGranularity(v)}
+                    options={[
+                      { value: '5min', label: '5min' },
+                      { value: '15min', label: '15min' },
+                      { value: '1hr', label: '1hr' },
+                      { value: '1day', label: '1day' },
+                    ]}
+                  />
+                  {/* T-Reports-001 §AC 2.3：視角切換 toggle（CPM 類強制 device；AEM 顯示）*/}
+                  <Radio.Group
+                    value={effectiveViewMode}
+                    onChange={(e) => setEnergyViewMode(e.target.value)}
+                    optionType="button"
+                    buttonStyle="solid"
+                    disabled={!energyDeviceIsAem}
+                    options={[
+                      { value: 'device', label: '依設備' },
+                      { value: 'circuit', label: '依迴路' },
+                    ]}
+                  />
+                  {/* AEM 依迴路：circuit 下拉（24 路）*/}
+                  {energyDeviceIsAem && effectiveViewMode === 'circuit' && (
+                    <Select
+                      style={{ width: 200 }}
+                      placeholder="選擇迴路"
+                      value={energyCircuitId}
+                      onChange={setEnergyCircuitId}
+                      options={aemCircuitOptions}
+                      allowClear
+                    />
+                  )}
                   <Button
                     type="primary"
                     icon={<ReloadOutlined />}
-                    onClick={fetchEnergy}
-                    loading={energyLoading}
+                    onClick={() => {
+                      // 觸發既有 LineChart fetch（FF=true 時用）+ HistoryTable hook
+                      fetchEnergy();
+                      setEnergyHistoryRange([range[0], range[1]]);
+                    }}
+                    loading={energyLoading || energyHistoryLoading}
+                    disabled={!energyDevice || (energyDeviceIsAem && effectiveViewMode === 'circuit' && !energyCircuitId)}
                   >
                     查詢
                   </Button>
@@ -565,15 +694,62 @@ export default function Reports() {
                     )}
                   </Card>
                 )}
-                {!FF_REPORTS_LINECHART_ENABLED && (
+                {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
+                {/* AEM「依設備」視角：無 device-level metric → 提示切換「依迴路」*/}
+                {energyDeviceIsAem && effectiveViewMode === 'device' && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 16 }}
+                    message="AEM-DRB1 為 24 路盤式電表"
+                    description="本設備為 per-circuit 結構（24 個迴路：ba1~ba12 / bb1~bb12）；無 device-level 電壓 / 頻率 / 總功率 metric。請切換至「依迴路」並選擇迴路以檢視 6 項用電（電壓/頻率為設備級無資料；電流/總功率/功率因數/累積用電 4 項可用）。"
+                  />
+                )}
+                {/* AEM「依迴路」未選 circuit：提示 */}
+                {energyDeviceIsAem && effectiveViewMode === 'circuit' && !energyCircuitId && (
                   <Alert
                     type="info"
                     showIcon
                     style={{ marginTop: 16 }}
-                    message="6 項用電履歷列表開發中（T-Reports-001）"
-                    description="折線圖已隱藏（業主分析比對需求可設 VITE_FF_REPORTS_LINECHART_ENABLED=true 啟用）；履歷列表（電壓/頻率/電流/總功率/功率因數/累積用電 6 項）+ 視角切換（依設備/依迴路）+ granularity selector（5min 起）正在等 backend API 擴充。"
+                    message="請選擇迴路"
+                    description="AEM-DRB1 共 24 個迴路（ba1~ba12 / bb1~bb12）；選擇後按「查詢」載入該迴路履歷。"
                   />
                 )}
+                {/* CPM 類 + AEM 已選迴路：HistoryTable 6 column */}
+                {(!energyDeviceIsAem || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
+                  <HistoryTable
+                    columns={energyColumns}
+                    data={energyHistoryRows}
+                    loading={energyHistoryLoading}
+                    granularity={energyGranularity}
+                    emptyText={energyHistoryRange ? '時段內無資料' : '請按「查詢」載入資料'}
+                    title={
+                      <Space>
+                        <span>
+                          用電履歷列表 — {energyDevice ?? '尚未選擇設備'}
+                          {energyDeviceIsAem && effectiveViewMode === 'circuit' && energyCircuitId
+                            ? ` · ${energyCircuitId}`
+                            : ''}
+                        </span>
+                        <Tag color="blue">{energyGranularity}</Tag>
+                        {effectiveViewMode === 'circuit' && energyCircuitId && (
+                          <Tag color="purple">依迴路</Tag>
+                        )}
+                      </Space>
+                    }
+                  />
+                )}
+                {/* 5min/1hr 路徑首尾值 null 提示（M-P12-025 §7.2）*/}
+                {(energyGranularity === '5min' || energyGranularity === '1hr') &&
+                  energyHistoryRows.length > 0 && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginTop: 12 }}
+                      message="5min / 1hr 路徑：累積用電 (energy_kwh) 顯示 avg_value（first/last/energy_delta=null）"
+                      description="累積能量差通常 15min+ 粒度才精確（DLC backlog）；如需精確累計差請切 15min 或 1day。"
+                    />
+                  )}
               </>
             ),
           },
