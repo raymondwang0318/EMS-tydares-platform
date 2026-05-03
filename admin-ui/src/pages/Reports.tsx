@@ -14,14 +14,21 @@ import api from '../services/api';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
 import {
   useActiveAlerts,
+  useAlertHistory,
   computeDeviceHealth,
   findEdgeDownAlerts,
   type AlertActive,
+  type AlertHistoryEvent,
 } from '../hooks/useAlerts';
 import AlertsHistory from './AlertsHistory';
 import { FF_REPORTS_LINECHART_ENABLED } from '../lib/featureFlags';
+import HistoryTable, {
+  type Granularity,
+  type HistoryColumnSpec,
+  type HistoryRow,
+} from '../components/HistoryTable';
 
-const { Title } = Typography;
+const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
 interface EventRow {
@@ -145,6 +152,9 @@ export default function Reports() {
   const [thermalLoading, setThermalLoading] = useState(false);
   const [thermalError, setThermalError] = useState<string | undefined>();
   const [thermalQueriedRange, setThermalQueriedRange] = useState<[Dayjs, Dayjs] | null>(null);
+  // T-Reports-001 §AC 2.4 thermal granularity selector
+  // 當前 backend 只支援 daily（cagg_thermal_daily）；5min/15min/1hr 待 P12 backend 擴 cagg
+  const [thermalGranularity, setThermalGranularity] = useState<Granularity>('1day');
 
   // 載入設備清單
   useEffect(() => {
@@ -332,6 +342,86 @@ export default function Reports() {
       .sort((a, b) => a.ts.localeCompare(b.ts))
       .map((e) => ({ ts: dayjs(e.ts).format('MM-DD'), avg: e.avg, max: e.max, min: e.min }));
   }, [thermalPoints]);
+
+  // T-Reports-001 §AC 2.4：thermal Alert history（事件 marker 對齊用）
+  // 取當前選中 device + 查詢區間的 alert history events；前端 floor 到 day 與 thermal row 對齊
+  const thermalAlertHistoryFilter = useMemo(() => {
+    if (!thermalDevice || !thermalQueriedRange) return undefined;
+    return {
+      device_id: thermalDevice,
+      since: thermalQueriedRange[0].toISOString(),
+      until: thermalQueriedRange[1].toISOString(),
+      limit: 500,
+    };
+  }, [thermalDevice, thermalQueriedRange]);
+  const { data: thermalAlertHistoryData } = useAlertHistory(thermalAlertHistoryFilter ?? {});
+  const thermalAlertHistory: AlertHistoryEvent[] = thermalAlertHistoryFilter
+    ? thermalAlertHistoryData ?? []
+    : [];
+
+  // T-Reports-001 §AC 2.4：thermal HistoryTable rows
+  // 從 thermalPoints group by bucket_day；attach events floor 到 day
+  const thermalHistoryRows = useMemo<HistoryRow[]>(() => {
+    if (!thermalPoints.length) return [];
+
+    // group thermalPoints by bucket_day → 每 day 收 max/min/avg
+    const byDay = new Map<
+      string,
+      { ts: string; daily_max: number | null; daily_min: number | null; daily_avg: number | null }
+    >();
+    thermalPoints.forEach((p) => {
+      const key = p.bucket_day ?? p.ts ?? '';
+      if (!key) return;
+      const existing =
+        byDay.get(key) ?? { ts: key, daily_max: null, daily_min: null, daily_avg: null };
+      if (p.parameter_code === 'max_temp' && p.daily_max != null) existing.daily_max = p.daily_max;
+      if (p.parameter_code === 'min_temp' && p.daily_min != null) existing.daily_min = p.daily_min;
+      if (p.parameter_code === 'avg_temp' && p.daily_avg != null) existing.daily_avg = p.daily_avg;
+      byDay.set(key, existing);
+    });
+
+    // alert events group by day floor（YYYY-MM-DD 對齊）
+    const eventsByDay = new Map<string, AlertHistoryEvent[]>();
+    thermalAlertHistory.forEach((e) => {
+      const dayKey = dayjs(e.ts).format('YYYY-MM-DD');
+      const arr = eventsByDay.get(dayKey) ?? [];
+      arr.push(e);
+      eventsByDay.set(dayKey, arr);
+    });
+
+    return Array.from(byDay.values()).map((row) => {
+      const dayKey = dayjs(row.ts).format('YYYY-MM-DD');
+      return {
+        ts: row.ts,
+        daily_max: row.daily_max,
+        daily_min: row.daily_min,
+        daily_avg: row.daily_avg,
+        max_coord: null, // backend 待擴（cagg_thermal_5min 完成後可加）
+        events: eventsByDay.get(dayKey) ?? [],
+      } as HistoryRow;
+    });
+  }, [thermalPoints, thermalAlertHistory]);
+
+  // 老王指定 4 column thermal（max/min/avg + max_coord）
+  const thermalColumns: HistoryColumnSpec<HistoryRow>[] = useMemo(
+    () => [
+      { key: 'daily_max', title: '最高溫', unit: '°C', precision: 1, width: 110 },
+      { key: 'daily_min', title: '最低溫', unit: '°C', precision: 1, width: 110 },
+      { key: 'daily_avg', title: '平均溫', unit: '°C', precision: 1, width: 110 },
+      {
+        key: 'max_coord',
+        title: '最高溫座標',
+        width: 130,
+        render: (val) =>
+          val == null ? (
+            <Text type="secondary" style={{ fontSize: 11 }}>—（待 backend）</Text>
+          ) : (
+            String(val)
+          ),
+      },
+    ],
+    [],
+  );
 
   const thermalSummary = useMemo(() => {
     const avgs = thermalPoints
@@ -655,22 +745,43 @@ export default function Reports() {
                   </Card>
                 )}
                 {!FF_REPORTS_LINECHART_ENABLED && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginTop: 16 }}
-                    message={
-                      <Space>
-                        <span>熱像履歷列表開發中（T-Reports-001）</span>
-                        {thermalSelectedHealth && (
-                          <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
-                            {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
-                          </Tag>
-                        )}
-                      </Space>
-                    }
-                    description="折線圖已隱藏（業主分析比對需求可設 VITE_FF_REPORTS_LINECHART_ENABLED=true 啟用）；熱像履歷列表（max_temp/min_temp/avg_temp/max_coord）+ granularity selector（5min 起）正在等 backend API 擴充（cagg_thermal_5min）。當前最高/最低/平均溫摘要仍可參考上方 Statistic 卡。"
-                  />
+                  <>
+                    <Space style={{ marginBottom: 12 }} wrap>
+                      <Text type="secondary" style={{ fontSize: 12 }}>granularity：</Text>
+                      <Select
+                        size="small"
+                        style={{ width: 200 }}
+                        value={thermalGranularity}
+                        onChange={(v) => setThermalGranularity(v)}
+                        options={[
+                          { value: '5min', label: '5min（待 backend）', disabled: true },
+                          { value: '15min', label: '15min（待 backend）', disabled: true },
+                          { value: '1hr', label: '1hr（待 backend）', disabled: true },
+                          { value: '1day', label: '1day（既有）' },
+                        ]}
+                      />
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        ⓘ 5min/15min/1hr 待 P12 backend 擴 cagg_thermal_5min（[[T-Reports-001]] §AC 1.4 升報）
+                      </Text>
+                    </Space>
+                    <HistoryTable
+                      columns={thermalColumns}
+                      data={thermalHistoryRows}
+                      loading={thermalLoading}
+                      granularity={thermalGranularity}
+                      emptyText={thermalQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'}
+                      title={
+                        <Space>
+                          <span>熱像履歷列表 — {thermalSelectedLabel || '尚未選擇 IR 設備'}</span>
+                          {thermalSelectedHealth && (
+                            <Tag color={thermalSelectedHealth.color} title={thermalSelectedHealth.tooltip}>
+                              {thermalSelectedHealth.emoji} {thermalSelectedHealth.label}
+                            </Tag>
+                          )}
+                        </Space>
+                      }
+                    />
+                  </>
                 )}
               </>
             ),
