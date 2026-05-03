@@ -266,14 +266,36 @@ async def _query_cagg_view(
     return (await db.execute(text(sql), params)).fetchall()
 
 
+_THERMAL_VALID_GRANULARITY = ("5min", "15min", "1hr", "1day")
+_THERMAL_BUCKET_INTERVAL = {"5min": "5 minutes", "15min": "15 minutes", "1hr": "1 hour"}
+_THERMAL_DEFAULT_PARAMS = ["max_temp", "min_temp", "avg_temp"]
+
+
 @router.get("/thermal", response_model=ThermalReportResponse)
 async def thermal_report(
-    mode: str = Query("latest", pattern="^(latest|trend)$"),
+    mode: str = Query("latest", pattern="^(latest|trend|history)$"),
     device_id: str | None = None,
+    device_ids: list[str] | None = Query(None, description="history mode: filter device_id list"),
+    parameter_codes: list[str] | None = Query(None, description="history mode: 預設 [max/min/avg_temp]"),
+    granularity: str | None = Query(None, description="history mode: 5min|15min|1hr|1day"),
     from_ts: datetime | None = None,
     to_ts: datetime | None = None,
     db: AsyncSession = Depends(get_db),
 ):
+    """Thermal 報表（T-Reports-001 §AC 2.4 backend；M-PM-100 §二補派）.
+
+    mode:
+      - latest: 既有；每 device_id × parameter_code 最新一筆
+      - trend: 既有；cagg_thermal_daily ORDER BY bucket_day
+      - history: 新增；granularity 5min/15min/1hr 走 trx_reading + time_bucket；
+                 1day 走 cagg_thermal_daily。鏡像 [[M-P12-025]] energy pattern。
+                 device_id LIKE '811c_%' 強制守門（純 IR 設備路徑）。
+    """
+    if mode == "history":
+        return await _thermal_history(
+            db, granularity, device_ids, parameter_codes, from_ts, to_ts,
+        )
+
     if mode == "latest":
         where = ["parameter_code IN ('max_temp','min_temp','avg_temp')"]
         params: dict[str, object] = {}
@@ -324,6 +346,94 @@ async def thermal_report(
             for r in rows
         ]
     return ThermalReportResponse(mode=mode, items=items)
+
+
+async def _thermal_history(
+    db: AsyncSession,
+    granularity: str | None,
+    device_ids: list[str] | None,
+    parameter_codes: list[str] | None,
+    from_ts: datetime | None,
+    to_ts: datetime | None,
+) -> ThermalReportResponse:
+    """mode=history: 鏡像 [[M-P12-025]] energy pattern.
+
+    granularity:
+      - 5min/15min/1hr: trx_reading + time_bucket（device_id LIKE '811c_%' 守門）
+      - 1day: cagg_thermal_daily 既有
+    parameter_codes 預設 [max_temp, min_temp, avg_temp]（thermal 三 metric 全套）
+    device_ids 可選 filter
+    """
+    # Validation
+    if granularity is None or granularity not in _THERMAL_VALID_GRANULARITY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"history mode requires granularity ∈ {{{', '.join(_THERMAL_VALID_GRANULARITY)}}}",
+        )
+    if from_ts is None or to_ts is None:
+        raise HTTPException(status_code=422, detail="history mode requires from_ts and to_ts")
+    if from_ts >= to_ts:
+        raise HTTPException(status_code=422, detail="from_ts must be < to_ts")
+
+    params_list = parameter_codes if parameter_codes else _THERMAL_DEFAULT_PARAMS
+
+    if granularity == "1day":
+        # cagg_thermal_daily 既有
+        where_clauses = ["bucket_day >= :from_ts", "bucket_day < :to_ts",
+                         "parameter_code = ANY(:param_codes)"]
+        params: dict = {"from_ts": from_ts, "to_ts": to_ts, "param_codes": params_list}
+        if device_ids:
+            where_clauses.append("device_id = ANY(:device_ids)")
+            params["device_ids"] = device_ids
+        # device_id LIKE '811c_%' 守門（M-PM-100 §2.1 純 IR 路徑）
+        where_clauses.append("device_id LIKE '811c\\_%' ESCAPE '\\'")
+        sql = f"""
+            SELECT bucket_day AS ts, device_id, parameter_code,
+                   daily_max AS max_value, daily_min AS min_value, daily_avg AS avg_value
+            FROM cagg_thermal_daily
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY bucket_day, device_id, parameter_code
+        """
+        rows = (await db.execute(text(sql), params)).fetchall()
+    else:
+        # 5min / 15min / 1hr: trx_reading + time_bucket
+        # interval 受控（同 energy 5min/1hr fix；防 asyncpg cast 踩坑）
+        interval = _THERMAL_BUCKET_INTERVAL[granularity]
+        if interval not in {"5 minutes", "15 minutes", "1 hour"}:
+            raise HTTPException(status_code=500, detail=f"unsupported bucket interval: {interval}")
+
+        where_clauses = ["ts >= :from_ts", "ts < :to_ts",
+                         "parameter_code = ANY(:param_codes)",
+                         "device_id LIKE '811c\\_%' ESCAPE '\\'"]
+        params = {"from_ts": from_ts, "to_ts": to_ts, "param_codes": params_list}
+        if device_ids:
+            where_clauses.append("device_id = ANY(:device_ids)")
+            params["device_ids"] = device_ids
+        sql = f"""
+            SELECT time_bucket(INTERVAL '{interval}', ts) AS bucket,
+                   device_id, parameter_code,
+                   MAX(value) AS max_value,
+                   MIN(value) AS min_value,
+                   AVG(value) AS avg_value
+            FROM trx_reading
+            WHERE {' AND '.join(where_clauses)}
+            GROUP BY bucket, device_id, parameter_code
+            ORDER BY bucket, device_id, parameter_code
+        """
+        rows = (await db.execute(text(sql), params)).fetchall()
+
+    items = [
+        {
+            "ts": r[0].isoformat() if r[0] else None,
+            "device_id": r[1],
+            "parameter_code": r[2],
+            "max_value": float(r[3]) if r[3] is not None else None,
+            "min_value": float(r[4]) if r[4] is not None else None,
+            "avg_value": float(r[5]) if r[5] is not None else None,
+        }
+        for r in rows
+    ]
+    return ThermalReportResponse(mode="history", items=items)
 
 
 @router.get("/events", response_model=EventsReportResponse)
