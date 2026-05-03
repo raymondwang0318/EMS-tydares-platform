@@ -306,6 +306,29 @@ export default function Reports() {
     [],
   );
 
+  // T-Reports-001 §AC 2.3 granularity options（穩定 reference 避免 inline array 觸發 ant-d Select 重 mount 時 displayed label 卡舊）
+  // 老王 2026-05-04 chat 補校正：「下拉選單顯示沒連動一起變更顯示」
+  const energyGranularityOptions = useMemo(
+    () => [
+      { value: '5min', label: '5min' },
+      { value: '15min', label: '15min' },
+      { value: '1hr', label: '1hr' },
+      { value: '1day', label: '1day' },
+    ],
+    [],
+  );
+
+  // T-Reports-001 §AC 2.4 thermal granularity options（同 energy 穩定 reference；5min/15min/1hr 待 backend cagg_thermal_5min）
+  const thermalGranularityOptions = useMemo(
+    () => [
+      { value: '5min', label: '5min（待 backend）', disabled: true },
+      { value: '15min', label: '15min（待 backend）', disabled: true },
+      { value: '1hr', label: '1hr（待 backend）', disabled: true },
+      { value: '1day', label: '1day（既有）' },
+    ],
+    [],
+  );
+
   // ========== Events ==========
   const fetchEvents = async () => {
     setEventsLoading(true);
@@ -592,16 +615,13 @@ export default function Reports() {
                     disabled={devicesLoading}
                   />
                   {/* T-Reports-001 §AC 2.3：granularity selector（5min 起；M-P12-025 backend 擴後 enable 全選項）*/}
+                  {/* 老王 2026-05-04 chat：「下拉選單顯示沒連動」→ options 用 useMemo 穩定 reference + key 強制 displayed label 重 render */}
                   <Select
+                    key={`energy-gran-${energyGranularity}`}
                     style={{ width: 120 }}
                     value={energyGranularity}
                     onChange={(v) => setEnergyGranularity(v)}
-                    options={[
-                      { value: '5min', label: '5min' },
-                      { value: '15min', label: '15min' },
-                      { value: '1hr', label: '1hr' },
-                      { value: '1day', label: '1day' },
-                    ]}
+                    options={energyGranularityOptions}
                   />
                   {/* T-Reports-001 §AC 2.3：視角切換 toggle（CPM 類強制 device；AEM 顯示）*/}
                   <Radio.Group
@@ -720,8 +740,10 @@ export default function Reports() {
                   />
                 )}
                 {/* CPM 類 + AEM 任何視角（依設備 ma_* / 依迴路已選 circuit）：HistoryTable 6 column */}
+                {/* 老王 2026-05-04 chat 補校正「下拉選單顯示沒連動」→ HistoryTable + 內部 Tag 加 key 強制 re-mount when granularity 變動 */}
                 {(!energyDeviceIsAem || effectiveViewMode === 'device' || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
                   <HistoryTable
+                    key={`energy-htbl-${energyGranularity}-${energyDevice}-${energyCircuitId ?? ''}`}
                     columns={energyColumns}
                     data={energyHistoryRows}
                     loading={energyHistoryLoading}
@@ -735,7 +757,7 @@ export default function Reports() {
                             ? ` · ${energyCircuitId}`
                             : ''}
                         </span>
-                        <Tag color="blue">{energyGranularity}</Tag>
+                        <Tag key={`energy-gran-tag-${energyGranularity}`} color="blue">{energyGranularity}</Tag>
                         {effectiveViewMode === 'circuit' && energyCircuitId && (
                           <Tag color="purple">依迴路</Tag>
                         )}
@@ -929,22 +951,19 @@ export default function Reports() {
                     <Space style={{ marginBottom: 12 }} wrap>
                       <Text type="secondary" style={{ fontSize: 12 }}>granularity：</Text>
                       <Select
+                        key={`thermal-gran-${thermalGranularity}`}
                         size="small"
                         style={{ width: 200 }}
                         value={thermalGranularity}
                         onChange={(v) => setThermalGranularity(v)}
-                        options={[
-                          { value: '5min', label: '5min（待 backend）', disabled: true },
-                          { value: '15min', label: '15min（待 backend）', disabled: true },
-                          { value: '1hr', label: '1hr（待 backend）', disabled: true },
-                          { value: '1day', label: '1day（既有）' },
-                        ]}
+                        options={thermalGranularityOptions}
                       />
                       <Text type="secondary" style={{ fontSize: 11 }}>
                         ⓘ 5min/15min/1hr 待 P12 backend 擴 cagg_thermal_5min（[[T-Reports-001]] §AC 1.4 升報）
                       </Text>
                     </Space>
                     <HistoryTable
+                      key={`thermal-htbl-${thermalGranularity}-${thermalDevice ?? ''}`}
                       columns={thermalColumns}
                       data={thermalHistoryRows}
                       loading={thermalLoading}
