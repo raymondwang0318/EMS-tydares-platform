@@ -62,16 +62,17 @@ export function useEnergyReport(filter: EnergyReportFilter | null) {
     enabled: !!filter && filter.parameter_codes.length > 0 && !!filter.from_ts && !!filter.to_ts,
     queryFn: async () => {
       if (!filter) return null;
-      const r = await api.get<EnergyReportResponse>('/reports/energy', {
-        params: {
-          granularity: filter.granularity,
-          parameter_codes: filter.parameter_codes,
-          circuit_id: filter.circuit_id,
-          device_ids: filter.device_ids,
-          from_ts: filter.from_ts,
-          to_ts: filter.to_ts,
-        },
-      });
+      // FastAPI Query(List[str]) 接受 repeat-key（?parameter_codes=A&parameter_codes=B）
+      // axios 預設陣列序列化用 bracket notation（?parameter_codes[]=A）→ 不對齊 → 必修
+      // 用 URLSearchParams 手動序列化保證 repeat-key
+      const params = new URLSearchParams();
+      params.append('granularity', filter.granularity);
+      filter.parameter_codes.forEach((c) => params.append('parameter_codes', c));
+      if (filter.circuit_id) params.append('circuit_id', filter.circuit_id);
+      filter.device_ids?.forEach((d) => params.append('device_ids', d));
+      params.append('from_ts', filter.from_ts);
+      params.append('to_ts', filter.to_ts);
+      const r = await api.get<EnergyReportResponse>(`/reports/energy?${params.toString()}`);
       return r.data;
     },
     staleTime: 30_000,
