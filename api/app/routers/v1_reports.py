@@ -138,12 +138,18 @@ async def _query_trx_time_bucket(
     """5min / 1hr: trx_reading + time_bucket aggregation.
 
     NB: trx_reading 無 first/last 直接欄；用 first_value() / last_value() window 太貴 →
-    本路徑只回 avg/min/max；first/last/energy_delta 為 None（5min/1hr granularity 通常不需 累積能量差）。
+    本路徑只回 avg/min/max；first/last/energy_delta 為 None（5min/1hr granularity 通常不需累積能量差）。
+
+    NB2: time_bucket 的 interval 參數**內部受控**（來自 _BUCKET_INTERVAL dict，非用戶輸入），
+    asyncpg cast str→interval 會撞 type mismatch（同 T-P12-002 踩坑）→ 直接 f-string inline 安全。
     """
+    # interval 受控白名單守（雙保險防注入）
+    if interval not in {"5 minutes", "1 hour"}:
+        raise HTTPException(status_code=500, detail=f"unsupported bucket interval: {interval}")
+
     where_clauses = ["ts >= :from_ts", "ts < :to_ts"]
     params: dict = {
         "from_ts": from_ts, "to_ts": to_ts,
-        "interval_text": interval,
         "param_codes": parameter_codes,
     }
     where_clauses.append("parameter_code = ANY(:param_codes)")
@@ -158,7 +164,7 @@ async def _query_trx_time_bucket(
 
     if group_by == "device":
         sql = f"""
-            SELECT time_bucket(CAST(:interval_text AS interval), ts) AS bucket,
+            SELECT time_bucket(INTERVAL '{interval}', ts) AS bucket,
                    device_id AS group_key,
                    parameter_code,
                    AVG(value) AS avg_value,
