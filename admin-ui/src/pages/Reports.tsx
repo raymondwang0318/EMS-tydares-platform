@@ -665,9 +665,10 @@ export default function Reports() {
                           {energyQueriedRange[0].format('YYYY-MM-DD HH:mm')} ~{' '}
                           {energyQueriedRange[1].format('YYYY-MM-DD HH:mm')}
                           {' · '}
-                          {pickEnergyGranularity(energyQueriedRange)} 粒度
+                          {/* Bug 1 修（M-PM-099 §一）：用 selector state 即時連動，不用 range 推導 snapshot */}
+                          {energyGranularity} 粒度
                           {' · '}
-                          {energyPoints.length} 點
+                          {energyHistoryRows.length || energyPoints.length} 點
                         </div>
                       )}
                     </Card>
