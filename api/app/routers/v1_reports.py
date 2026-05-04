@@ -377,24 +377,58 @@ async def _thermal_history(
 
     params_list = parameter_codes if parameter_codes else _THERMAL_DEFAULT_PARAMS
 
+    # M-PM-102 Bug 7: max_coord_* 用 last_value (B 設計取捨)；溫度仍 MAX/MIN/AVG
+    # 拆 params_list 為 temp_codes (max/min/avg_temp) + coord_codes (max_coord_*)
+    temp_codes = [p for p in params_list if not p.startswith("max_coord_")]
+    coord_codes = [p for p in params_list if p.startswith("max_coord_")]
+
     if granularity == "1day":
-        # cagg_thermal_daily 既有
-        where_clauses = ["bucket_day >= :from_ts", "bucket_day < :to_ts",
-                         "parameter_code = ANY(:param_codes)"]
-        params: dict = {"from_ts": from_ts, "to_ts": to_ts, "param_codes": params_list}
-        if device_ids:
-            where_clauses.append("device_id = ANY(:device_ids)")
-            params["device_ids"] = device_ids
-        # device_id LIKE '811c_%' 守門（M-PM-100 §2.1 純 IR 路徑）
-        where_clauses.append("device_id LIKE '811c\\_%' ESCAPE '\\'")
-        sql = f"""
-            SELECT bucket_day AS ts, device_id, parameter_code,
-                   daily_max AS max_value, daily_min AS min_value, daily_avg AS avg_value
-            FROM cagg_thermal_daily
-            WHERE {' AND '.join(where_clauses)}
-            ORDER BY bucket_day, device_id, parameter_code
-        """
-        rows = (await db.execute(text(sql), params)).fetchall()
+        # M-PM-102 §2.3 設計取捨（DLC 候選）:
+        # - temp_codes 走 cagg_thermal_daily 既有 daily_max/min/avg
+        # - coord_codes 不走 cagg（daily_max 對 0-7 離散座標語意錯）;
+        #   改 trx_reading + time_bucket('1 day', ts) 取 last_value
+        # 兩段 UNION ALL，前端統一接 max/min/avg_value (coord 三欄同值=last)
+        rows = []
+        params: dict = {"from_ts": from_ts, "to_ts": to_ts}
+
+        if temp_codes:
+            params_temp = {**params, "temp_codes": temp_codes}
+            where_t = ["bucket_day >= :from_ts", "bucket_day < :to_ts",
+                       "parameter_code = ANY(:temp_codes)",
+                       "device_id LIKE '811c\\_%' ESCAPE '\\'"]
+            if device_ids:
+                where_t.append("device_id = ANY(:device_ids)")
+                params_temp["device_ids"] = device_ids
+            sql_t = f"""
+                SELECT bucket_day AS ts, device_id, parameter_code,
+                       daily_max AS max_value, daily_min AS min_value, daily_avg AS avg_value
+                FROM cagg_thermal_daily
+                WHERE {' AND '.join(where_t)}
+            """
+            rows.extend((await db.execute(text(sql_t), params_temp)).fetchall())
+
+        if coord_codes:
+            params_c = {**params, "coord_codes": coord_codes}
+            where_c = ["ts >= :from_ts", "ts < :to_ts",
+                       "parameter_code = ANY(:coord_codes)",
+                       "device_id LIKE '811c\\_%' ESCAPE '\\'"]
+            if device_ids:
+                where_c.append("device_id = ANY(:device_ids)")
+                params_c["device_ids"] = device_ids
+            sql_c = f"""
+                SELECT time_bucket(INTERVAL '1 day', ts) AS ts,
+                       device_id, parameter_code,
+                       (array_agg(value ORDER BY ts DESC))[1] AS max_value,
+                       (array_agg(value ORDER BY ts DESC))[1] AS min_value,
+                       (array_agg(value ORDER BY ts DESC))[1] AS avg_value
+                FROM trx_reading
+                WHERE {' AND '.join(where_c)}
+                GROUP BY ts, device_id, parameter_code
+            """
+            rows.extend((await db.execute(text(sql_c), params_c)).fetchall())
+
+        # Sort merged result
+        rows = sorted(rows, key=lambda r: (r[0], r[1], r[2]))
     else:
         # 5min / 15min / 1hr: trx_reading + time_bucket
         # interval 受控（同 energy 5min/1hr fix；防 asyncpg cast 踩坑）
@@ -409,12 +443,24 @@ async def _thermal_history(
         if device_ids:
             where_clauses.append("device_id = ANY(:device_ids)")
             params["device_ids"] = device_ids
+
+        # M-PM-102 §2.2 (B): max_coord_* 用 last_value (array_agg ORDER BY ts DESC)[1]
+        # 同一筆 sample 的 row 與 col 對齊（避免 MAX(row) 配 MAX(col) 來自不同採樣）
         sql = f"""
             SELECT time_bucket(INTERVAL '{interval}', ts) AS bucket,
                    device_id, parameter_code,
-                   MAX(value) AS max_value,
-                   MIN(value) AS min_value,
-                   AVG(value) AS avg_value
+                   CASE WHEN parameter_code LIKE 'max_coord_%'
+                        THEN (array_agg(value ORDER BY ts DESC))[1]
+                        ELSE MAX(value)
+                   END AS max_value,
+                   CASE WHEN parameter_code LIKE 'max_coord_%'
+                        THEN (array_agg(value ORDER BY ts DESC))[1]
+                        ELSE MIN(value)
+                   END AS min_value,
+                   CASE WHEN parameter_code LIKE 'max_coord_%'
+                        THEN (array_agg(value ORDER BY ts DESC))[1]
+                        ELSE AVG(value)
+                   END AS avg_value
             FROM trx_reading
             WHERE {' AND '.join(where_clauses)}
             GROUP BY bucket, device_id, parameter_code

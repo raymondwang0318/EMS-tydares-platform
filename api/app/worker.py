@@ -111,7 +111,15 @@ def _flatten_modbus(payload: dict, msg_ts: datetime, device_id: str) -> list[dic
 
 
 def _flatten_ir(payload: dict, msg_ts: datetime, device_id: str) -> list[dict]:
-    """熱像 summary 展平（max/min/avg temp）。"""
+    """熱像 summary 展平（max/min/avg temp + max_coord row/col）.
+
+    M-PM-102 Bug 7 補展平 max_coord：payload["max_coord"] = {"row": int, "col": int}（0-7）
+    拆兩個 numeric parameter_code（max_coord_row / max_coord_col）入 trx_reading；
+    讓 thermal endpoint mode=history 可 SQL aggregate（同 metric pattern）。
+
+    Refs: ADR-025 DR-025-02 max_coord 0-7；T-Reports-001 §AC 2.4 thermal 履歷座標 column；
+    ADR-028 §8.1 L3 卡幀偵測（同像素同值連續幀）需 max_coord 軌跡。
+    """
     rows: list[dict] = []
     for param_code in ("max_temp", "min_temp", "avg_temp"):
         if param_code in payload and isinstance(payload[param_code], (int, float)):
@@ -121,6 +129,28 @@ def _flatten_ir(payload: dict, msg_ts: datetime, device_id: str) -> list[dict]:
                 "circuit_code": "_all",
                 "parameter_code": param_code,
                 "value": float(payload[param_code]),
+                "quality": 0,
+            })
+
+    # M-PM-102 Bug 7: max_coord {"row", "col"} 拆兩 numeric metric
+    mc = payload.get("max_coord")
+    if isinstance(mc, dict):
+        if isinstance(mc.get("row"), (int, float)):
+            rows.append({
+                "ts": msg_ts,
+                "device_id": device_id,
+                "circuit_code": "_all",
+                "parameter_code": "max_coord_row",
+                "value": float(mc["row"]),
+                "quality": 0,
+            })
+        if isinstance(mc.get("col"), (int, float)):
+            rows.append({
+                "ts": msg_ts,
+                "device_id": device_id,
+                "circuit_code": "_all",
+                "parameter_code": "max_coord_col",
+                "value": float(mc["col"]),
                 "quality": 0,
             })
     return rows
