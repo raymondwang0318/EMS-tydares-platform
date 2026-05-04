@@ -401,11 +401,12 @@ export default function Reports() {
     const queriedRange: [Dayjs, Dayjs] = [range[0], range[1]];
     try {
       // M-P12-026 thermal endpoint mode=history + granularity 5min/15min/1hr/1day
+      // M-P12-027 Bug 7：補 max_coord_row / max_coord_col 兩 metric（5/4 凌晨後 worker 部署生效）
       // FastAPI Query(List[str]) repeat-key 序列化（同 useEnergyReport pattern）
       const params = new URLSearchParams();
       params.append('mode', 'history');
       params.append('granularity', thermalGranularity);
-      ['max_temp', 'min_temp', 'avg_temp'].forEach((c) =>
+      ['max_temp', 'min_temp', 'avg_temp', 'max_coord_row', 'max_coord_col'].forEach((c) =>
         params.append('parameter_codes', c),
       );
       params.append('device_ids', thermalDevice);
@@ -476,22 +477,37 @@ export default function Reports() {
     ? thermalAlertHistoryData ?? []
     : [];
 
-  // T-Reports-001 §AC 2.4 + Bug 5 修：thermal HistoryTable rows
+  // T-Reports-001 §AC 2.4 + Bug 5/7 修：thermal HistoryTable rows
   // M-P12-026 mode=history schema：max_value / min_value / avg_value（5min/15min/1hr/1day 統一）
+  // M-P12-027 Bug 7：max_coord_row / max_coord_col last_value 收斂三欄同值，取 avg_value 取整
   // group by ts（5min/15min/1hr 走 trx_reading bucket；1day 走 cagg；ts/bucket_day 都接受）
   const thermalHistoryRows = useMemo<HistoryRow[]>(() => {
     if (!thermalPoints.length) return [];
 
-    // group thermalPoints by ts → 每 bucket 收 max/min/avg
+    // group thermalPoints by ts → 每 bucket 收 max/min/avg + max_coord
     const byBucket = new Map<
       string,
-      { ts: string; daily_max: number | null; daily_min: number | null; daily_avg: number | null }
+      {
+        ts: string;
+        daily_max: number | null;
+        daily_min: number | null;
+        daily_avg: number | null;
+        max_coord_row: number | null;
+        max_coord_col: number | null;
+      }
     >();
     thermalPoints.forEach((p) => {
       const key = p.ts ?? p.bucket_day ?? '';
       if (!key) return;
       const existing =
-        byBucket.get(key) ?? { ts: key, daily_max: null, daily_min: null, daily_avg: null };
+        byBucket.get(key) ?? {
+          ts: key,
+          daily_max: null,
+          daily_min: null,
+          daily_avg: null,
+          max_coord_row: null,
+          max_coord_col: null,
+        };
       // mode=history 用 max_value / min_value / avg_value；mode=trend 用 daily_*（fallback）
       const v_max = p.max_value ?? p.daily_max;
       const v_min = p.min_value ?? p.daily_min;
@@ -499,6 +515,11 @@ export default function Reports() {
       if (p.parameter_code === 'max_temp' && v_max != null) existing.daily_max = v_max;
       if (p.parameter_code === 'min_temp' && v_min != null) existing.daily_min = v_min;
       if (p.parameter_code === 'avg_temp' && v_avg != null) existing.daily_avg = v_avg;
+      // Bug 7（M-P12-027）：max_coord_row / col 三欄同值（last_value 收斂），取 avg_value
+      if (p.parameter_code === 'max_coord_row' && p.avg_value != null)
+        existing.max_coord_row = p.avg_value;
+      if (p.parameter_code === 'max_coord_col' && p.avg_value != null)
+        existing.max_coord_col = p.avg_value;
       byBucket.set(key, existing);
     });
 
@@ -513,12 +534,17 @@ export default function Reports() {
 
     return Array.from(byBucket.values()).map((row) => {
       const dayKey = dayjs(row.ts).format('YYYY-MM-DD');
+      // Bug 7（M-P12-027）：5/4 凌晨 worker 部署後 trx_reading 才有 max_coord_row/col；之前歷史 row 仍 null（顯「—」是預期）
+      const maxCoord =
+        row.max_coord_row != null && row.max_coord_col != null
+          ? { row: Math.round(row.max_coord_row), col: Math.round(row.max_coord_col) }
+          : null;
       return {
         ts: row.ts,
         daily_max: row.daily_max,
         daily_min: row.daily_min,
         daily_avg: row.daily_avg,
-        max_coord: null, // backend 待擴（cagg_thermal_5min 完成後可加）
+        max_coord: maxCoord,
         events: eventsByDay.get(dayKey) ?? [],
       } as HistoryRow;
     });
@@ -534,12 +560,22 @@ export default function Reports() {
         key: 'max_coord',
         title: '最高溫座標',
         width: 130,
-        render: (val) =>
-          val == null ? (
-            <Text type="secondary" style={{ fontSize: 11 }}>—（待 backend）</Text>
-          ) : (
-            String(val)
-          ),
+        render: (val) => {
+          // Bug 7（M-P12-027）：max_coord = { row: 0-7, col: 0-7 } 8×8 像素中熱點位置
+          // 5/4 凌晨 worker 部署前歷史 row 無 max_coord_row/col → null → 顯「—」（預期，不是 bug）
+          if (val == null || typeof val !== 'object') {
+            return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+          }
+          const v = val as { row?: number; col?: number };
+          if (v.row == null || v.col == null) {
+            return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+          }
+          return (
+            <Text style={{ fontFamily: 'monospace' }}>
+              ({v.row}, {v.col})
+            </Text>
+          );
+        },
       },
     ],
     [],
