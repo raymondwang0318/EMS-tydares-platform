@@ -9,6 +9,7 @@ import Ecsu from './pages/Ecsu';
 import BillingStandard from './pages/BillingStandard';
 import Reports from './pages/Reports';
 import IrDevices from './pages/IrDevices';
+import ThermalView from './pages/ThermalView';
 
 const { Title, Paragraph } = Typography;
 
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/ecsu" element={<Ecsu />} />
           <Route path="/billing" element={<BillingStandard />} />
           <Route path="/ir-devices" element={<IrDevices />} />
+          <Route path="/thermal/all" element={<ThermalView />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/config" element={<ConfigPlaceholder />} />
           <Route path="*" element={<NotFound />} />
