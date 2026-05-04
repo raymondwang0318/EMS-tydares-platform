@@ -415,15 +415,17 @@ async def _thermal_history(
             if device_ids:
                 where_c.append("device_id = ANY(:device_ids)")
                 params_c["device_ids"] = device_ids
+            # NB: alias 不能用 'ts' 否則 GROUP BY 會 ambiguous bind 到 trx_reading.ts
+            # 而非 time_bucket alias（PostgreSQL 行為）→ 用 'bucket' 確保 GROUP BY 收斂
             sql_c = f"""
-                SELECT time_bucket(INTERVAL '1 day', ts) AS ts,
+                SELECT time_bucket(INTERVAL '1 day', ts) AS bucket,
                        device_id, parameter_code,
                        (array_agg(value ORDER BY ts DESC))[1] AS max_value,
                        (array_agg(value ORDER BY ts DESC))[1] AS min_value,
                        (array_agg(value ORDER BY ts DESC))[1] AS avg_value
                 FROM trx_reading
                 WHERE {' AND '.join(where_c)}
-                GROUP BY ts, device_id, parameter_code
+                GROUP BY bucket, device_id, parameter_code
             """
             rows.extend((await db.execute(text(sql_c), params_c)).fetchall())
 
