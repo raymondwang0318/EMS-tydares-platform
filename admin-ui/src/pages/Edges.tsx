@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag } from 'antd';
 import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -39,6 +39,19 @@ function formatTime(iso: string | null): string {
 export default function Edges() {
   const { data: edges, isLoading, isFetching, refetch, error } = useEdges();
   const { message, modal } = App.useApp();
+
+  // M-PM-123 §3.5 通用 loading-timeout fallback：保證最壞 ~15 sec 顯示 timeout UI 而非永久 hang
+  // 對齊老王 2026-05-06 chat 「載入中 >10 min」regression；無論 axios timeout / react-query retry / Tailscale 路由
+  // 何種根因，都不會讓使用者卡 loading state >15 sec
+  const [loadingStuck, setLoadingStuck] = useState(false);
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingStuck(false);
+      return;
+    }
+    const t = setTimeout(() => setLoadingStuck(true), 15_000);
+    return () => clearTimeout(t);
+  }, [isLoading]);
 
   const approve = useApproveEdge();
   const revoke = useRevokeEdge();
@@ -316,6 +329,28 @@ export default function Edges() {
           style={{ marginBottom: 16 }}
           message="讀取 Edge 列表失敗"
           description={(error as Error).message}
+          action={
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => refetch()}>
+              重試
+            </Button>
+          }
+        />
+      )}
+
+      {loadingStuck && (
+        // M-PM-123 §3.5 loading timeout fallback — 15s 仍 isLoading 即顯重試 UI
+        // 真正根因如 backend hang / Tailscale 斷 / nginx 反代 buffer 卡 → 老王 F12 console 看 [useEdges] err log
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="載入時間超過 15 秒"
+          description="後端 /v1/admin/edges 回應比預期慢；可能網路 / Tailscale / 反代問題；F12 Console 可看 [useEdges] 錯誤詳情。點「重試」重新載入；或檢查 Edge 主機網路是否暢通。"
+          action={
+            <Button size="small" type="primary" icon={<ReloadOutlined />} onClick={() => refetch()}>
+              重試
+            </Button>
+          }
         />
       )}
 

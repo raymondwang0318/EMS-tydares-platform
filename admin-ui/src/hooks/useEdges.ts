@@ -26,11 +26,30 @@ export interface Edge {
 export function useEdges() {
   return useQuery({
     queryKey: queryKeys.edges.list(),
-    queryFn: async (): Promise<Edge[]> => {
-      const { data } = await api.get<Edge[]>('/admin/edges');
-      return data;
+    queryFn: async ({ signal }): Promise<Edge[]> => {
+      // M-PM-123 通用防禦：明確 abort signal + 10s per-request timeout（蓋過 axios 15s default；
+      // 配合 react-query queryClient retry=2，最壞 ~30s 內 settle 不會永久 hang）
+      const t0 = Date.now();
+      try {
+        const { data } = await api.get<Edge[]>('/admin/edges', {
+          signal,
+          timeout: 10000,
+        });
+        return data;
+      } catch (err) {
+        // M-PM-123 §3.5 console 留 trace 方便 F12 採證根因
+        console.error('[useEdges] /admin/edges fetch failed', {
+          elapsed_ms: Date.now() - t0,
+          err,
+        });
+        throw err;
+      }
     },
     refetchInterval: 30_000,
+    // M-PM-123 顯式 retry/staleTime（覆蓋 queryClient default `failureCount < 2`；本 query 用 retry=1 加快錯誤可見性）
+    retry: 1,
+    retryDelay: 500,
+    staleTime: 15_000,
   });
 }
 
