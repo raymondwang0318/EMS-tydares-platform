@@ -31,8 +31,9 @@ log = logging.getLogger("alert_evaluator")
 
 ALERT_TICK_SEC = 30.0
 
-# 階段 A 暴力假設：所有 811c_* device 都屬 edge-pi-01（單 Edge 部署）
-# ADR-028 DR-028-05 已備註；多 Edge 模板化複用為未來工作
+# Multi-Edge phase B (M-PM-110 軌 A②)：edge_id 從 ems_ir_device_metadata 派生
+# 對 metadata.edge_id IS NULL row fallback 用 DEFAULT_EDGE_ID（向下相容）
+# 後續若 P11 Wizard 強制必填 → 改 NOT NULL 後 fallback 可移除
 DEFAULT_EDGE_ID = "TYDARES-E66"
 
 # In-memory state（Phase α/β；多 worker 部署轉 Redis）
@@ -81,14 +82,16 @@ async def evaluate_rules_tick(session_factory: async_sessionmaker) -> None:
             ORDER BY rule_id
         """))).fetchall()
 
-        # === Step 3: 載 managed IR devices（display_name 非空）===
+        # === Step 3: 載 managed IR devices（display_name 非空 + per-device edge_id）===
+        # M-PM-110 軌 A②：edge_id 從 metadata 派生（取代 phase A hardcoded DEFAULT_EDGE_ID）
+        # COALESCE 對 metadata.edge_id IS NULL row fallback 為 DEFAULT_EDGE_ID（向下相容）
         managed_irs_rows = (await db.execute(text("""
-            SELECT m.device_id
+            SELECT m.device_id, COALESCE(m.edge_id, :default_edge_id) AS edge_id
             FROM ems_ir_device_metadata m
             WHERE m.display_name IS NOT NULL AND m.display_name <> ''
-        """))).fetchall()
+        """), {"default_edge_id": DEFAULT_EDGE_ID})).fetchall()
         managed_ir_devices = [
-            {"device_id": row[0], "edge_id": DEFAULT_EDGE_ID}
+            {"device_id": row[0], "edge_id": row[1]}
             for row in managed_irs_rows
         ]
 
