@@ -17,6 +17,26 @@ export interface IrDevice {
   device_id: string; // e.g. "811c_00-0d-e0-92-11-9e"
   display_name: string | null;
   last_seen: string | null; // ISO 8601 UTC
+  /**
+   * 所屬 Edge ID。
+   *
+   * - M-PM-110 軌 A① schema migration 後 backend ir-devices SELECT 會回傳此欄位
+   * - 過渡期（schema migration 未完前）後端 SELECT 不含此欄位 → undefined → UI 走 fallback
+   * - M-PM-111 §2.3 / §3.3 fallback：當前 7 顆 IR 全在 Edge01（TYDARES-E66；M-PM-104 §3.2）
+   */
+  edge_id?: string | null;
+}
+
+/**
+ * IR 設備所屬 Edge fallback 邏輯（M-PM-111 §2.3）。
+ *
+ * 軌 A① schema migration 完成前 IrDevice.edge_id 為 undefined；統一走 'TYDARES-E66'。
+ * Phase 2（schema migration 完成）後端會回傳真實 edge_id；本 helper 自動透傳。
+ */
+export const FALLBACK_EDGE_ID = 'TYDARES-E66';
+export function getIrEdgeId(device: IrDevice): string {
+  const v = (device.edge_id ?? '').trim();
+  return v || FALLBACK_EDGE_ID;
 }
 
 const IR_DEVICES_KEY = ['ir-devices'] as const;
@@ -35,10 +55,25 @@ export function useIrDevices() {
 export function useUpsertIrLabel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ device_id, display_name }: { device_id: string; display_name: string }) => {
+    mutationFn: async ({
+      device_id,
+      display_name,
+      edge_id,
+    }: {
+      device_id: string;
+      display_name: string;
+      /**
+       * M-PM-111 軌 A③.1 — 過渡期送 edge_id；軌 A① schema migration 完成後 backend 會接受寫入。
+       * 當前 backend `PUT /admin/ir-devices/{id}/label` 只認 display_name；edge_id 多送會被
+       * Pydantic / Body parse 忽略（FastAPI default extra='ignore'）；不影響既有交卷。
+       */
+      edge_id?: string | null;
+    }) => {
+      const body: Record<string, unknown> = { display_name };
+      if (edge_id != null) body.edge_id = edge_id;
       const r = await api.put<IrDevice>(
         `/admin/ir-devices/${encodeURIComponent(device_id)}/label`,
-        { display_name },
+        body,
       );
       return r.data;
     },

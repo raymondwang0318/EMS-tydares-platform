@@ -11,8 +11,8 @@
  *   GET  /v1/admin/ir-devices
  *   PUT  /v1/admin/ir-devices/{device_id}/label
  */
-import { useState } from 'react';
-import { Alert, Button, Form, Input, Modal, Table, Tag, Typography, message } from 'antd';
+import { useMemo, useState } from 'react';
+import { Alert, Button, Form, Input, Modal, Select, Table, Tag, Typography, message } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -20,20 +20,62 @@ import {
   useIrDevices,
   useUpsertIrLabel,
   isIrUnnamed,
+  getIrEdgeId,
+  FALLBACK_EDGE_ID,
   type IrDevice,
 } from '../hooks/useIrDevices';
+import { useEdges } from '../hooks/useEdges';
 
 const { Title, Text } = Typography;
 
 export default function IrDevices() {
   const { data, isLoading, error } = useIrDevices();
+  const { data: edgesData } = useEdges();
   const upsert = useUpsertIrLabel();
   const [editing, setEditing] = useState<IrDevice | null>(null);
-  const [form] = Form.useForm<{ display_name: string }>();
+  const [form] = Form.useForm<{ display_name: string; edge_id: string }>();
+
+  // M-PM-111 軌 A③.1：active edges 作為編輯下拉選項
+  // status 在 'approved' / 'maintenance' 視為可掛載 IR 設備；其他（pending/revoked）排除
+  const edgeOptions = useMemo(() => {
+    const list = (edgesData ?? []).filter(
+      (e) => e.status === 'approved' || e.status === 'maintenance',
+    );
+    // 過渡期保證 fallback edge 一定在選單裡（即使 list 為空也能編輯）
+    if (!list.find((e) => e.edge_id === FALLBACK_EDGE_ID)) {
+      list.unshift({
+        edge_id: FALLBACK_EDGE_ID,
+        edge_name: '農技大樓 Edge01（fallback）',
+        site_code: null,
+        hostname: null,
+        fingerprint: null,
+        previous_fingerprints: [],
+        status: 'approved',
+        last_seen_ip: null,
+        last_seen_at: null,
+        config_version: 0,
+        registered_at: null,
+        approved_at: null,
+        approved_by: null,
+        maintenance_at: null,
+        replaced_at: null,
+        revoked_at: null,
+        revoked_reason: null,
+        remark_desc: null,
+      });
+    }
+    return list.map((e) => ({
+      value: e.edge_id,
+      label: e.edge_name ? `${e.edge_id} · ${e.edge_name}` : e.edge_id,
+    }));
+  }, [edgesData]);
 
   const handleEdit = (rec: IrDevice) => {
     setEditing(rec);
-    form.setFieldsValue({ display_name: rec.display_name ?? '' });
+    form.setFieldsValue({
+      display_name: rec.display_name ?? '',
+      edge_id: getIrEdgeId(rec),
+    });
   };
 
   const handleSave = async () => {
@@ -43,6 +85,7 @@ export default function IrDevices() {
       await upsert.mutateAsync({
         device_id: editing.device_id,
         display_name: values.display_name.trim(),
+        edge_id: values.edge_id,
       });
       message.success('已更新名稱代號');
       setEditing(null);
@@ -74,6 +117,27 @@ export default function IrDevices() {
           {v}
         </Text>
       ),
+    },
+    {
+      // M-PM-111 軌 A③.1：所屬 Edge column（軌 A①schema migration 完成後 backend 自動回真值；
+      // 過渡期 getIrEdgeId fallback 'TYDARES-E66'；UI 標 fallback Tag）
+      title: '所屬 Edge',
+      dataIndex: 'edge_id',
+      key: 'edge_id',
+      width: 200,
+      render: (_v, rec) => {
+        const eid = getIrEdgeId(rec);
+        const isFallback = !rec.edge_id;
+        const edgeName = (edgesData ?? []).find((e) => e.edge_id === eid)?.edge_name;
+        const display = edgeName ? `${eid} · ${edgeName}` : eid;
+        return isFallback ? (
+          <Tag color="default" title="後端尚未回傳 edge_id；過渡期 fallback（軌 A① 完成後自動切真值）">
+            {display}
+          </Tag>
+        ) : (
+          <Text>{display}</Text>
+        );
+      },
     },
     {
       title: '最後上報',
@@ -149,6 +213,15 @@ export default function IrDevices() {
             extra="範例：農技大樓 1F 機房門口 / 變電室 A 區 / 配電盤 #3 主匯流排"
           >
             <Input placeholder="例：農技大樓 1F 機房門口" autoFocus />
+          </Form.Item>
+          {/* M-PM-111 軌 A③.1：edge_id Select（從 useEdges() active edges 派生）*/}
+          <Form.Item
+            name="edge_id"
+            label="所屬 Edge"
+            rules={[{ required: true, message: '請選擇所屬 Edge' }]}
+            extra="此 IR 設備掛載於哪個 Edge 主機；用於 Reports thermal 分群與 alert 抑制邏輯"
+          >
+            <Select options={edgeOptions} placeholder="選擇 Edge" showSearch optionFilterProp="label" />
           </Form.Item>
         </Form>
       </Modal>

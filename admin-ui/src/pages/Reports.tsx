@@ -11,7 +11,8 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import api from '../services/api';
-import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
+import { useIrDevices, irDisplayLabel, getIrEdgeId, type IrDevice } from '../hooks/useIrDevices';
+import { useEdges } from '../hooks/useEdges';
 import {
   useActiveAlerts,
   useAlertHistory,
@@ -189,6 +190,10 @@ export default function Reports() {
   const { data: irDevicesData, isLoading: irDevicesLoading } = useIrDevices();
   const irDevices: IrDevice[] = irDevicesData ?? [];
 
+  // M-PM-111 軌 A③.2：useEdges() 用於 thermal Tab device 下拉 OptGroup 分群（Edge → IR 設備）
+  // 過渡期軌 A① schema 未完 → IrDevice.edge_id undefined → getIrEdgeId fallback 'TYDARES-E66'
+  const { data: edgesData } = useEdges();
+
   // T-S11C-002 Phase γ-2 + γ-4：active alert 共用查詢（30 s polling；對齊 P12 worker tick）
   const { data: activeAlertsData } = useActiveAlerts();
   const activeAlerts: AlertActive[] = activeAlertsData ?? [];
@@ -208,16 +213,54 @@ export default function Reports() {
   // Thermal Tab 設備清單：用 IrDevice 結構（device_id 為 `811c_<MAC>`；display_name 顯示優先）
   // 依 T-S11C-001 AC 6：MAC 不出現前台；用 display_name 或「未命名 IR-N」
   // T-S11C-002 Phase γ-2：每筆附帶 health badge（綠 🟢 / 黃 🟡 / 橙 🟠 / 紅 🔴 / 灰 ⚪ Edge 抑制）
+  // M-PM-111 軌 A③.2：附帶 edge_id（fallback 'TYDARES-E66'）供 OptGroup 分群
   const thermalDevices = useMemo(
     () => irDevices.map((d, idx) => ({
       device_id: d.device_id,
       display_name: d.display_name,
       label: irDisplayLabel(d, idx),
       isUnnamed: !((d.display_name ?? '').trim()),
+      edge_id: getIrEdgeId(d),
       health: computeDeviceHealth(d.device_id, activeAlerts, suppressedEdgeId),
     })),
     [irDevices, activeAlerts, suppressedEdgeId],
   );
+
+  // M-PM-111 軌 A③.2：依 edge_id 分群成 OptGroup options
+  // 群名顯示「edge_id · edge_name（N 顆）」；edge_name 從 useEdges() 派生；fallback 顯純 edge_id
+  // useMemo 穩定 reference 避免 Select re-mount 顯示卡舊（同 energy gran 教訓）
+  const thermalGroupedOptions = useMemo(() => {
+    const groups = new Map<string, typeof thermalDevices>();
+    for (const d of thermalDevices) {
+      const list = groups.get(d.edge_id) ?? [];
+      list.push(d);
+      groups.set(d.edge_id, list);
+    }
+    return Array.from(groups.entries()).map(([edgeId, list]) => {
+      const edge = (edgesData ?? []).find((e) => e.edge_id === edgeId);
+      const groupLabel = edge?.edge_name
+        ? `${edgeId} · ${edge.edge_name}（${list.length} 顆）`
+        : `${edgeId}（${list.length} 顆）`;
+      return {
+        label: groupLabel,
+        options: list.map((d) => ({
+          value: d.device_id,
+          label: (
+            <Space size={4}>
+              <Tag color={d.health.color} style={{ marginRight: 0 }} title={d.health.tooltip}>
+                {d.health.emoji} {d.health.label}
+              </Tag>
+              {d.isUnnamed ? (
+                <Tag color="orange" style={{ marginRight: 0 }}>{d.label}</Tag>
+              ) : (
+                d.label
+              )}
+            </Space>
+          ),
+        })),
+      };
+    });
+  }, [thermalDevices, edgesData]);
 
   // Thermal Tab 標題用顯示徽章
   const thermalSelectedHealth = useMemo(() => {
@@ -862,28 +905,14 @@ export default function Reports() {
                 <Space style={{ marginBottom: 16 }} wrap>
                   {renderRange()}
                   <Select
-                    style={{ minWidth: 320 }}
+                    style={{ minWidth: 360 }}
                     placeholder={irDevicesLoading ? '載入 IR 設備中…' : '選擇 IR 設備'}
                     value={thermalDevice}
                     onChange={setThermalDevice}
                     optionLabelProp="label"
-                    options={thermalDevices.map((d) => ({
-                      value: d.device_id,
-                      // T-S11C-001 AC 6：MAC 不出現；用 display_name 或「未命名 IR-N」
-                      // T-S11C-002 Phase γ-2：附帶 health badge emoji + tooltip
-                      label: (
-                        <Space size={4}>
-                          <Tag color={d.health.color} style={{ marginRight: 0 }} title={d.health.tooltip}>
-                            {d.health.emoji} {d.health.label}
-                          </Tag>
-                          {d.isUnnamed ? (
-                            <Tag color="orange" style={{ marginRight: 0 }}>{d.label}</Tag>
-                          ) : (
-                            d.label
-                          )}
-                        </Space>
-                      ),
-                    }))}
+                    // M-PM-111 軌 A③.2：依 edge_id 分群（OptGroup）；過渡期軌 A① 未完前
+                    // 全部 fallback 'TYDARES-E66' 單群顯示；軌 A① 完成後自動展開多 Edge
+                    options={thermalGroupedOptions}
                     notFoundContent={irDevicesLoading ? <Spin size="small" /> : '無 IR 設備（請先到「IR 標籤管理」頁標記設備）'}
                     disabled={irDevicesLoading}
                   />
