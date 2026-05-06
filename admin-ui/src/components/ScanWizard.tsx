@@ -444,7 +444,11 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     }
   }, [scanStatus, elapsedSec, scanResults.length, scanLatency]);
 
-  const modalFooter = useMemo(() => {
+  // M-PM-138 修：原 useMemo deps 缺 [startScan, goToConfirm, handleConfirm, scanPlan]
+  // → button onClick 抓 mount-time stale closure → scan_plan 永遠送 default cpm12d slave 1
+  // → P12 DB ground truth 採證鐵證（M-P12-031）老王 UI 配 9 設備但 POST body 1 cpm12d default
+  // 最 surgical 修：改 IIFE 每次 render 重建（cost 微小；徹底解 stale closure）
+  const modalFooter = (() => {
     switch (wizardStep) {
       case 'config':
         return [
@@ -501,8 +505,7 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
           </Button>,
         ];
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, scanStatus, scanResults.length, confirmRows, bootstrap.isPending, createCommand.isPending, confirmDevicesMut.isPending]);
+  })();
 
   return (
     <Modal
