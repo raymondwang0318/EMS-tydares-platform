@@ -89,6 +89,38 @@ async def command_history(
     return CommandHistoryResponse(commands=items, total=total, limit=limit, offset=offset)
 
 
+# --- UI Command Detail (ScanWizard polling) ---
+# M-PM-137 Bug fix: 原本沒這個 endpoint；frontend 呼叫 GET /v1/commands/detail/{cmd_id}
+# 落入 main.py catch-all `/{full_path:path}` startswith('v1') return None
+# → FastAPI 序列化為 null + HTTP 200 → ScanWizard Step 2 timer 推進但無法進 Step 3
+# 路徑兩段 ('detail/{command_id}'); 不會被 single-segment '/commands/{edge_id}' 捕獲
+
+@router.get("/commands/detail/{command_id}", response_model=CommandItem,
+            dependencies=[Depends(verify_admin_token)])
+async def get_command_detail(
+    command_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """UI ScanWizard polling: 查單筆 command 狀態 (M-PM-137 補)."""
+    cmd = (await db.execute(
+        select(EmsCommand).where(EmsCommand.command_id == command_id)
+    )).scalar_one_or_none()
+    if cmd is None:
+        raise HTTPException(status_code=404, detail=f"Command {command_id} not found")
+    return CommandItem(
+        command_id=cmd.command_id,
+        edge_id=cmd.edge_id,
+        device_id=cmd.device_id,
+        command_type=cmd.command_type,
+        status=cmd.status,
+        payload_json=cmd.payload_json,
+        result_json=cmd.result_json,
+        issued_by=cmd.issued_by,
+        created_at=cmd.created_at.isoformat(),
+        updated_at=cmd.updated_at.isoformat(),
+    )
+
+
 # --- Edge Poll ---
 
 @router.get("/commands/{edge_id}", response_model=CommandPollResponse)

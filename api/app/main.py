@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -98,7 +98,9 @@ if EMS_DIR.exists():
     @app.get("/{full_path:path}")
     async def serve_frontend(request: Request, full_path: str):
         if full_path.startswith(API_PREFIXES):
-            return None
+            # M-PM-137 fix: 不存在的 /v1/* 路徑必須 raise 404，
+            # 避免 return None 被 FastAPI 序列化為 null + 200（silent null bug）
+            raise HTTPException(status_code=404, detail="Not Found")
         file_path = EMS_DIR / full_path
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
