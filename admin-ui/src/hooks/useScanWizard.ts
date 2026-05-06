@@ -71,7 +71,13 @@ export interface ConfirmDevicesResponse {
 }
 
 export interface CreateCommandRequest {
-  device_id: string;
+  /**
+   * M-PM-134: backend `/v1/commands` 期待 edge_id 為 top-level field（edge-level command 必填）。
+   * device.scan 是 edge-level（掃整個 RS-485 bus）；device.* 是 device-level（針對特定 device_id）。
+   * 兩者擇一即可；本介面同時支援。
+   */
+  edge_id?: string;
+  device_id?: string;
   command_type: string;
   payload: Record<string, unknown>;
   issued_by?: string;

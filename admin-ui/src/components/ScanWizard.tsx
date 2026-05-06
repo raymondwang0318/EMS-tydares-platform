@@ -232,8 +232,11 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
         payload.baudrate = rs485Baud;
       }
 
+      // M-PM-134 修：backend `/v1/commands` 期待 edge_id top-level（device.scan 是 edge-level command）
+      // 老王 2026-05-06 19:00 chat 採證 ground truth：缺 edge_id → 422
+      // 既有送 device_id placeholder 不是必要；保留 bootstrap 流程供 confirm 階段使用，但 createCommand 改送 edge_id
       const { command_id } = await createCommand.mutateAsync({
-        device_id: devices[0].device_id,
+        edge_id: edgeId,
         command_type: 'device.scan',
         payload,
         issued_by: 'admin-ui',
