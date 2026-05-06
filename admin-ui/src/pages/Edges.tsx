@@ -398,12 +398,53 @@ export default function Edges() {
 }
 
 function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
-  const { data: devices, isLoading, error } = useEdgeDevices(edgeId);
+  const { data: devices, isLoading, error, refetch } = useEdgeDevices(edgeId);
   const renameDevice = useRenameDevice();
   const { message } = App.useApp();
 
+  // M-PM-123 補修：子表 loadingStuck fallback（10s 超時）— 同 useEdges loadingStuck pattern
+  // 對齊老王 2026-05-06 chat 「展開 + 按鈕後子表載入中 >1 min」regression
+  const [stuck, setStuck] = useState(false);
+  useEffect(() => {
+    if (!isLoading) {
+      setStuck(false);
+      return;
+    }
+    const t = setTimeout(() => setStuck(true), 10_000);
+    return () => clearTimeout(t);
+  }, [isLoading]);
+
+  if (isLoading && stuck) {
+    return (
+      <Alert
+        type="warning"
+        showIcon
+        message={`Edge ${edgeId} 設備清單載入超過 10 秒`}
+        description="可能網路 / Tailscale / 反代問題；F12 Console 看 [useEdgeDevices] 錯誤詳情。"
+        action={
+          <Button size="small" type="primary" icon={<ReloadOutlined />} onClick={() => refetch()}>
+            重試
+          </Button>
+        }
+      />
+    );
+  }
   if (isLoading) return <Text type="secondary">載入中...</Text>;
-  if (error) return <Text type="danger">載入設備失敗：{(error as Error).message}</Text>;
+  if (error) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message={`Edge ${edgeId} 設備清單載入失敗`}
+        description={(error as Error).message}
+        action={
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => refetch()}>
+            重試
+          </Button>
+        }
+      />
+    );
+  }
 
   const rows = (devices ?? []).filter((d) => d.device_type !== '_placeholder');
   if (rows.length === 0) return <Text type="secondary">尚無已註冊設備</Text>;

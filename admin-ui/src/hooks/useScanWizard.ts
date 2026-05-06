@@ -82,12 +82,30 @@ export function useEdgeDevices(edgeId: string | null) {
     queryKey: edgeId
       ? queryKeys.devices.list({ edgeId })
       : ['devices', 'edge', 'none'],
-    queryFn: async (): Promise<EmsDevice[]> => {
+    queryFn: async ({ signal }): Promise<EmsDevice[]> => {
       if (!edgeId) return [];
-      const { data } = await api.get<EmsDevice[]>(`/admin/edges/${edgeId}/devices`);
-      return Array.isArray(data) ? data : [];
+      // M-PM-123 同 useEdges 修法：abort signal + 顯式 10s timeout + console.error trace
+      // 對齊老王 2026-05-06 chat 「展開 + 按鈕後子表載入中 >1 min」regression（curl 證實 backend <1ms 200 null）
+      const t0 = Date.now();
+      try {
+        const { data } = await api.get<EmsDevice[]>(`/admin/edges/${edgeId}/devices`, {
+          signal,
+          timeout: 10000,
+        });
+        return Array.isArray(data) ? data : [];
+      } catch (err) {
+        console.error('[useEdgeDevices] fetch failed', {
+          edgeId,
+          elapsed_ms: Date.now() - t0,
+          err,
+        });
+        throw err;
+      }
     },
     enabled: !!edgeId,
+    retry: 1,
+    retryDelay: 500,
+    staleTime: 15_000,
   });
 }
 
