@@ -179,7 +179,12 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
       const fresh = Array.isArray(res.data) ? res.data : [];
       inferDefaults(fresh);
     });
-  }, [open, edgeId, inferDefaults, refetchDevices, stopPolling]);
+    // M-PM-134 補修：deps 收斂只 [open, edgeId]；移除 inferDefaults / refetchDevices / stopPolling
+    // 避免 react-query refetch ref 不穩 → effect 重跑 → setElapsedSec(0) + stopPolling() → timer 永遠被砍
+    // 老王 2026-05-06 chat ground truth：「已等待 0 秒」永遠不計數 + scanStatus 卡 'QUEUED' 不變
+    // 三個 helpers 都是 useCallback([]) 穩定的；用 ref pattern 保證讀到最新即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, edgeId]);
 
   const startScan = async () => {
     if (!edgeId) return;
