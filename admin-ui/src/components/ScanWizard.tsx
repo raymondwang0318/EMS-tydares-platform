@@ -722,20 +722,29 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
           <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
             勾選要建立的設備，可編輯設備名稱。確認後將寫入資料庫並下發配置指令給 Edge。
           </Text>
+          {/* M-PM-138 fix3: D 區設備送電中但 Edge04 BusRuntime fc=3 timeout（wiring/baudrate/register addr）
+              → online=false；不應 hard block 確認建立。允許老王勾選離線設備；Edge BusRuntime 後續 polling 自動重試 */}
+          {confirmRows.some((r) => !r.online) && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`${confirmRows.filter((r) => !r.online).length} 台設備離線（Edge BusRuntime timeout）`}
+              description="設備送電但首次掃描通訊失敗（可能 RS-485 wiring / baudrate / slave_id / register addr 對應錯）；可仍勾選確認建立，Edge polling 將自動重試；P10 同步採證 RTU 通訊根因"
+            />
+          )}
           <Space style={{ marginBottom: 12 }}>
             <Checkbox
-              checked={confirmRows.length > 0 && confirmRows.every((r) => r.checked || !r.online)}
+              checked={confirmRows.length > 0 && confirmRows.every((r) => r.checked)}
               indeterminate={
-                confirmRows.some((r) => r.checked) && !confirmRows.every((r) => r.checked || !r.online)
+                confirmRows.some((r) => r.checked) && !confirmRows.every((r) => r.checked)
               }
               onChange={(e) => {
                 const v = e.target.checked;
-                setConfirmRows((prev) =>
-                  prev.map((row) => (row.online ? { ...row, checked: v } : row)),
-                );
+                setConfirmRows((prev) => prev.map((row) => ({ ...row, checked: v })));
               }}
             >
-              全選（在線）
+              全選（含離線）
             </Checkbox>
           </Space>
           <Table
@@ -749,9 +758,10 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
                 key: 'check',
                 width: 50,
                 render: (_: unknown, r: ConfirmRow, idx: number) => (
+                  // M-PM-138 fix3: 移除 disabled={!r.online}；允許老王勾選離線設備
+                  // 對齊「D 區送電但 RTU timeout」實況；建立後 Edge BusRuntime polling 自動重試
                   <Checkbox
                     checked={r.checked}
-                    disabled={!r.online}
                     onChange={(e) => {
                       setConfirmRows((prev) =>
                         prev.map((row, i) =>
@@ -786,10 +796,10 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
                 title: '設備名稱',
                 key: 'name',
                 render: (_: unknown, r: ConfirmRow, idx: number) => (
+                  // M-PM-138 fix3: 移除 disabled={!r.online}；允許離線設備改名（與勾選邏輯一致）
                   <Input
                     size="small"
                     value={r.device_name}
-                    disabled={!r.online}
                     onChange={(e) => {
                       setConfirmRows((prev) =>
                         prev.map((row, i) =>
