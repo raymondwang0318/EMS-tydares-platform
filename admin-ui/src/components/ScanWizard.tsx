@@ -321,22 +321,82 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     onClose();
   };
 
-  const addPlanEntry = () => {
+  const addPlanEntry = useCallback(() => {
     setScanPlan((prev) => [
       ...prev,
       { key: nextKeyRef.current++, slave_id: prev.length + 1, device_type: 'cpm12d' },
     ]);
-  };
-  const removePlanEntry = (key: number) => {
+  }, []);
+  const removePlanEntry = useCallback((key: number) => {
     setScanPlan((prev) => prev.filter((e) => e.key !== key));
-  };
-  const updatePlanEntry = (
+  }, []);
+  const updatePlanEntry = useCallback((
     key: number,
     field: 'slave_id' | 'device_type',
     value: number | string,
   ) => {
-    setScanPlan((prev) => prev.map((e) => (e.key === key ? { ...e, [field]: value } : e)));
-  };
+    // M-PM-132 候選 C 採證：留 console.error 級別 trace 方便老王 F12 看 onChange 是否真的觸發 + state 是否更新
+    console.log('[ScanWizard.updatePlanEntry]', { key, field, value });
+    setScanPlan((prev) => {
+      const next = prev.map((e) => (e.key === key ? { ...e, [field]: value } : e));
+      console.log('[ScanWizard.updatePlanEntry] state updated', { prev, next });
+      return next;
+    });
+  }, []);
+
+  // M-PM-132 修：columns 抽 useMemo 穩定 reference；避免每次 ScanWizard re-render
+  // 重建 columns array 導致 antd Table cell stale closure 抓不到最新 r.device_type
+  const scanPlanColumns = useMemo(
+    () => [
+      {
+        title: 'Slave ID',
+        dataIndex: 'slave_id',
+        key: 'slave_id',
+        width: 120,
+        render: (v: number, r: ScanPlanEntry) => (
+          <InputNumber
+            value={v}
+            min={1}
+            max={247}
+            size="small"
+            onChange={(val) => updatePlanEntry(r.key, 'slave_id', val ?? 1)}
+          />
+        ),
+      },
+      {
+        title: '設備類型',
+        dataIndex: 'device_type',
+        key: 'device_type',
+        render: (_v: string, r: ScanPlanEntry) => (
+          // M-PM-132 修：顯式從 r.device_type 取值（避免 antd dataIndex render 第一參數 stale 風險）
+          // + key={r.key + '-' + r.device_type} 確保 device_type 變動 Select 立即 re-mount 顯新值
+          <Select
+            key={`${r.key}-${r.device_type}`}
+            value={r.device_type}
+            size="small"
+            style={{ width: 160 }}
+            onChange={(val) => updatePlanEntry(r.key, 'device_type', val)}
+            options={DEVICE_TYPES}
+          />
+        ),
+      },
+      {
+        title: '',
+        key: 'action',
+        width: 60,
+        render: (_: unknown, r: ScanPlanEntry) => (
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => removePlanEntry(r.key)}
+            disabled={scanPlan.length <= 1}
+          />
+        ),
+      },
+    ],
+    [updatePlanEntry, removePlanEntry, scanPlan.length],
+  );
 
   const scanStepIndex = useMemo(() => {
     switch (scanStatus) {
@@ -522,51 +582,7 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
               rowKey="key"
               size="small"
               pagination={false}
-              columns={[
-                {
-                  title: 'Slave ID',
-                  dataIndex: 'slave_id',
-                  key: 'slave_id',
-                  width: 120,
-                  render: (v: number, r: ScanPlanEntry) => (
-                    <InputNumber
-                      value={v}
-                      min={1}
-                      max={247}
-                      size="small"
-                      onChange={(val) => updatePlanEntry(r.key, 'slave_id', val ?? 1)}
-                    />
-                  ),
-                },
-                {
-                  title: '設備類型',
-                  dataIndex: 'device_type',
-                  key: 'device_type',
-                  render: (v: string, r: ScanPlanEntry) => (
-                    <Select
-                      value={v}
-                      size="small"
-                      style={{ width: 160 }}
-                      onChange={(val) => updatePlanEntry(r.key, 'device_type', val)}
-                      options={DEVICE_TYPES}
-                    />
-                  ),
-                },
-                {
-                  title: '',
-                  key: 'action',
-                  width: 60,
-                  render: (_: unknown, r: ScanPlanEntry) => (
-                    <Button
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => removePlanEntry(r.key)}
-                      disabled={scanPlan.length <= 1}
-                    />
-                  ),
-                },
-              ]}
+              columns={scanPlanColumns}
             />
           </div>
         </div>
