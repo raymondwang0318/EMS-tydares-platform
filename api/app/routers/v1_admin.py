@@ -156,6 +156,7 @@ async def confirm_devices(
         raise HTTPException(status_code=400, detail="No devices to confirm")
 
     # 1. Batch insert ems_device (ON CONFLICT DO NOTHING for idempotency)
+    #    + ems_device_modbus 子表（M-P12-034 補；admin-ui list 需 slave_id 等細節）
     created_count = 0
     for dev in body.devices:
         device_kind = _DEVICE_KIND_MAP.get(dev.device_type, "other")
@@ -173,6 +174,27 @@ async def confirm_devices(
             },
         )
         created_count += result.rowcount or 0
+
+        # Modbus 子表：所有現支援 device_type (cpm12d/cpm23/aem_drb/tcs300b03) 都走 RTU
+        # M-PM-129 4-16 落案：AEM_DRB TCP 棄用全 RTU；對齊 v11_main.py dispatch
+        if device_kind == "modbus_meter":
+            await db.execute(
+                text("""
+                    INSERT INTO ems_device_modbus
+                        (device_id, slave_id, bus_id, transport, poll_interval_sec)
+                    VALUES
+                        (:device_id, :slave_id, :bus_id, 'rtu', 30)
+                    ON CONFLICT (device_id) DO UPDATE
+                    SET slave_id = EXCLUDED.slave_id,
+                        bus_id = EXCLUDED.bus_id,
+                        transport = EXCLUDED.transport
+                """),
+                {
+                    "device_id": dev.device_id,
+                    "slave_id": dev.slave_id,
+                    "bus_id": dev.bus_id,
+                },
+            )
     await db.commit()
 
     # 2. Cleanup bootstrap placeholder（保留歷史 scan commands FK）
