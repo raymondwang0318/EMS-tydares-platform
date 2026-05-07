@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +29,8 @@ from app.models import (
     FndEcsuCircuitAssgn,
     FndElectricParameter,
 )
-from app.services import config_service
+from app.services import command_service, config_service
+from app.services.wakeup_service import send_wakeup
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(verify_admin_token)])
 
@@ -100,6 +103,159 @@ async def bootstrap_placeholder_device(
 
     await db.commit()
     return {"device_id": device_id}
+
+
+# ========== Scan Confirm — 批次建立設備 + 下發 device.configure ==========
+# M-PM-148 fix: v1_admin.py 缺 /edges/{edge_id}/devices/confirm endpoint
+# 從 legacy admin.py（main.py 未掛載）遷入 + V2 schema 對齊（device_kind='modbus_meter')
+
+# device_type → device_kind mapping（V2 schema CHECK constraint 限定值）
+_DEVICE_KIND_MAP = {
+    "cpm12d": "modbus_meter",
+    "cpm23": "modbus_meter",
+    "aem_drb": "modbus_meter",
+    "tcs300b03": "modbus_meter",
+}
+
+
+class ConfirmCircuit(BaseModel):
+    circuit: str
+    ct_pri: int = 0
+    wire: str = ""
+
+
+class ConfirmDevice(BaseModel):
+    device_id: str
+    device_type: str  # frontend 命名（cpm12d/cpm23/aem_drb 等）；給 Edge active_devices.json 用
+    device_name: str = ""
+    slave_id: int
+    bus_id: str
+    circuits: List[ConfirmCircuit] = []
+
+
+class ConfirmDevicesRequest(BaseModel):
+    devices: List[ConfirmDevice]
+
+
+@router.post("/edges/{edge_id}/devices/confirm")
+async def confirm_devices(
+    edge_id: str,
+    body: ConfirmDevicesRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch-create ems_device records + issue device.configure to Edge.
+
+    對齊 V2-final schema:
+    - ems_device.device_kind: CHECK ∈ ('modbus_meter','thermal','relay','bacnet','other')
+      → frontend device_type ('cpm12d' 等) → mapped to 'modbus_meter'
+    - 完整 device_type 字串保留在 device.configure command payload（Edge dispatch 用）
+
+    M-PM-148 P0 fix（HTTP 405 修通；ScanWizard Step 3 確認建立解封）。
+    """
+    if not body.devices:
+        raise HTTPException(status_code=400, detail="No devices to confirm")
+
+    # 1. Batch insert ems_device (ON CONFLICT DO NOTHING for idempotency)
+    created_count = 0
+    for dev in body.devices:
+        device_kind = _DEVICE_KIND_MAP.get(dev.device_type, "other")
+        result = await db.execute(
+            text("""
+                INSERT INTO ems_device (device_id, edge_id, device_kind, display_name)
+                VALUES (:device_id, :edge_id, :device_kind, :display_name)
+                ON CONFLICT (device_id) DO NOTHING
+            """),
+            {
+                "device_id": dev.device_id,
+                "edge_id": edge_id,
+                "device_kind": device_kind,
+                "display_name": dev.device_name or f"{dev.device_type}-{edge_id}-slave{dev.slave_id}",
+            },
+        )
+        created_count += result.rowcount or 0
+    await db.commit()
+
+    # 2. Cleanup bootstrap placeholder（保留歷史 scan commands FK）
+    placeholder_id = f"_scan-{edge_id}"
+    first_real_id = body.devices[0].device_id
+    if first_real_id != placeholder_id:
+        await db.execute(
+            text("UPDATE ems_commands SET device_id = :new_id WHERE device_id = :placeholder"),
+            {"new_id": first_real_id, "placeholder": placeholder_id},
+        )
+    await db.execute(
+        text("DELETE FROM ems_device WHERE device_id = :placeholder AND edge_id = :edge_id"),
+        {"placeholder": placeholder_id, "edge_id": edge_id},
+    )
+    await db.commit()
+
+    # 3. Build device.configure payload — 完整 snapshot（Edge 全量覆寫 active_devices.json）
+    existing_map: Dict[str, Dict[str, Any]] = {}
+    rows = await db.execute(
+        text("""
+            SELECT payload_json FROM ems_commands
+            WHERE command_type = 'device.configure'
+              AND status = 'SUCCEEDED'
+              AND device_id IN (SELECT device_id FROM ems_device WHERE edge_id = :edge_id)
+            ORDER BY updated_at DESC
+        """),
+        {"edge_id": edge_id},
+    )
+    for (payload,) in rows.fetchall():
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        for d in (payload or {}).get("devices", []):
+            code = d.get("device_code")
+            if code and code not in existing_map:
+                existing_map[code] = d
+
+    # 本次 body.devices 覆蓋既有
+    for dev in body.devices:
+        active_circuits: Dict[str, Dict[str, Any]] = {}
+        for c in dev.circuits:
+            active_circuits[c.circuit] = {
+                "ct_pri": c.ct_pri,
+                "wire": c.wire,
+                "label": "",
+            }
+        existing_map[dev.device_id] = {
+            "device_code": dev.device_id,
+            "device_type": dev.device_type,  # 保留 frontend 命名給 Edge
+            "slave_id": dev.slave_id,
+            "bus_id": dev.bus_id,
+            "active_circuits": active_circuits,
+        }
+
+    # 過濾 placeholder + 已刪除設備
+    valid_rows = await db.execute(
+        text("SELECT device_id FROM ems_device WHERE edge_id = :edge_id"),
+        {"edge_id": edge_id},
+    )
+    valid_ids = {r[0] for r in valid_rows.fetchall() if not r[0].startswith("_")}
+    configure_devices = [d for code, d in existing_map.items() if code in valid_ids]
+
+    # 4. Issue device.configure command
+    configure_command_id = await command_service.create_command(
+        db=db,
+        edge_id=edge_id,
+        device_id=body.devices[0].device_id,
+        command_type="device.configure",
+        payload={"devices": configure_devices},
+        priority=0,
+        idempotency_key=None,
+        issued_by="admin-ui",
+    )
+
+    # 5. MQTT wake-up（non-fatal）
+    try:
+        send_wakeup(edge_id=edge_id)
+    except Exception:
+        pass
+
+    return {
+        "created_count": created_count,
+        "command_id": configure_command_id,
+    }
 
 
 # ========== /admin/devices ==========
