@@ -1,13 +1,17 @@
 /**
- * 811C 即時熱像監控頁（M-PM-107 軌 1 frontend 遷移；遷自 platform-UI legacy）
+ * 811C 即時熱像監控頁
  *
- * Route: `/admin-ui/thermal/all`（M-PM-104 §2.2 採完整 JPEG + 熱力圖路徑；M-P10-028 image base64 已恢復）
+ * Route: `/admin-ui/thermal/all`
  *
- * 功能：
- * - SSE 即時 frame 流入（GET /stream/811c；nginx port 8080 proxy → Pi）
- * - 7 顆 811C 連網設備自動列入 device 下拉
- * - 完整 JPEG 底圖 + 半透明 IR 8×8 熱力圖疊加 + 最高溫十字標記
- * - 對齊 admin-ui IR 標籤頁 display_name（如有則顯示；無則 device_id）
+ * 設計原則（老王 5/7 chat M-PM-158 校正）：
+ *   - 「811C 不要綁死在某一顆 Edge 上面」 — IR 設備可漂移，UI 不認 edge_id
+ *   - 「存活判定認 MAC + 安裝位置標籤」 — device_id（MAC）為主鍵，display_name 為人讀
+ *
+ * 實作（multi-edge fan-in）：
+ *   - useEdges() 列所有 active edges → 對每顆 Edge 直連 SSE（CORS ACAO=* 已驗）
+ *   - 多 SSE 同時聚合 frame；以 device_id 為索引
+ *   - 不顯示 Edge 來源；列出所有看到 frame 的 IR + display_name 作辨識
+ *   - 老王在 IR 標籤管理頁改 display_name → 此處下拉同步（safe sort + idle filter）
  */
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { Card, Tag, Typography, Spin, Badge, Select, Space } from 'antd';
@@ -29,22 +33,17 @@ type FrameState = {
   summary: ThermalSummary;
 };
 
-const EDGE_VIA_CENTRAL = '__central__';
-
 export default function ThermalView() {
-  // M-PM-158 multi-edge：Edge selector 切 SSE 來源
-  // - 'central' (default) → 走 nginx `/stream/811c` proxy（hardcoded → E66；M-PM-133 §3.2 single-edge backcompat）
-  // - 個別 edge_id → 直連 Edge LAN `http://{last_seen_ip}:8080/stream/811c`（CORS 已驗 ACAO=*）
-  // 採證 M-PM-158 §2.3：Edge04 SSE GET 帶 Origin → 200 + ACAO * → CORS 不阻塞
-  const [selectedEdge, setSelectedEdge] = useState<string>(EDGE_VIA_CENTRAL);
   const [frames, setFrames] = useState<Record<string, FrameState>>({});
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>();
   const [lastUpdate, setLastUpdate] = useState('');
-  const [connected, setConnected] = useState(false);
+  const [activeConnections, setActiveConnections] = useState(0);
+  const [totalConnections, setTotalConnections] = useState(0);
 
-  // 對齊 admin-ui IR 標籤頁的 display_name
+  // 對齊 admin-ui IR 標籤頁的 display_name（安裝位置標籤）
   const { data: irDevicesData } = useIrDevices();
   const { data: edgesData } = useEdges();
+
   const irNameMap = useMemo(() => {
     const m = new Map<string, string>();
     (irDevicesData ?? []).forEach((d, idx) => {
@@ -53,40 +52,18 @@ export default function ThermalView() {
     return m;
   }, [irDevicesData]);
 
-  // M-PM-158 active edges 為 Edge selector 選項（approved / maintenance；含 hostname for tooltip）
-  const edgeOptions = useMemo(() => {
+  // M-PM-158 multi-edge fan-in：所有 active edges 的 SSE base URL
+  // active = approved / maintenance；用 last_seen_ip LAN 直連（CORS ACAO=* 已驗）
+  const sseBaseUrls = useMemo(() => {
     const active = (edgesData ?? []).filter(
-      (e) => e.status === 'approved' || e.status === 'maintenance',
+      (e) => (e.status === 'approved' || e.status === 'maintenance') && e.last_seen_ip,
     );
-    return [
-      {
-        value: EDGE_VIA_CENTRAL,
-        label: '全部 Edge（透過 Central nginx）',
-      },
-      ...active.map((e) => ({
-        value: e.edge_id,
-        label: `${e.edge_id}${e.hostname ? ` · ${e.hostname}` : ''}${e.last_seen_ip ? ` (${e.last_seen_ip})` : ''}`,
-      })),
-    ];
+    return active.map((e) => `http://${e.last_seen_ip}:8080`);
   }, [edgesData]);
-
-  // M-PM-158 dynamic SSE base URL：依 selectedEdge 切換
-  const sseBaseUrl = useMemo(() => {
-    if (selectedEdge === EDGE_VIA_CENTRAL) {
-      // 同 origin → nginx /stream/811c proxy（hardcoded E66 backcompat）
-      return (import.meta.env.VITE_THERMAL_SSE_URL as string | undefined)
-        ?? (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/v\d+$/, '')
-        ?? '';
-    }
-    // 直連特定 Edge LAN
-    const edge = (edgesData ?? []).find((e) => e.edge_id === selectedEdge);
-    if (!edge?.last_seen_ip) return '';
-    return `http://${edge.last_seen_ip}:8080`;
-  }, [selectedEdge, edgesData]);
 
   const handleFrame = useCallback(
     (sseFrame: { device_id: string; ts: string; image?: string; irdata: string; shift: string }) => {
-      // ThermalView legacy line 27-28 既有 guard 直接適用（M-PM-104 §2.2 撤 fallback；走完整 JPEG 路徑）
+      // legacy guard：無 image 不渲染（M-PM-104 §2.2 撤 fallback；走完整 JPEG 路徑）
       if (!sseFrame.image) return;
 
       const state: FrameState = {
@@ -107,26 +84,14 @@ export default function ThermalView() {
     [],
   );
 
-  // M-PM-158 切 Edge 時：reset frame state（避免顯示舊 Edge 的 frame）
   useEffect(() => {
-    setFrames({});
-    setSelectedDevice(undefined);
-    setLastUpdate('');
-  }, [selectedEdge]);
+    if (sseBaseUrls.length === 0) return;
 
-  useEffect(() => {
-    if (!sseBaseUrl && selectedEdge !== EDGE_VIA_CENTRAL) {
-      // selected edge 但 last_seen_ip 為 null（offline 或未 enroll）→ 不嘗試連
-      console.warn('[ThermalView] selected edge has no last_seen_ip; SSE not connected', selectedEdge);
-      thermalSSEClient.disconnect();
-      setConnected(false);
-      return;
-    }
-
-    thermalSSEClient.connect(sseBaseUrl);
+    thermalSSEClient.connectMulti(sseBaseUrls);
 
     const checkInterval = setInterval(() => {
-      setConnected(thermalSSEClient.isConnected);
+      setActiveConnections(thermalSSEClient.activeConnectionCount);
+      setTotalConnections(thermalSSEClient.totalConnectionCount);
     }, 2000);
 
     const unsub = thermalSSEClient.onFrame(handleFrame);
@@ -136,15 +101,35 @@ export default function ThermalView() {
       unsub();
       thermalSSEClient.disconnect();
     };
-  }, [sseBaseUrl, selectedEdge, handleFrame]);
+  }, [sseBaseUrls, handleFrame]);
 
-  const deviceList = Object.keys(frames);
+  // 設備清單：聯集（所有看過 frame 的 device_id + 所有已標記的 IR 設備）
+  // 設計：device_id 是 MAC（主鍵）；display_name 是安裝位置標籤（人讀辨識）
+  const allDeviceIds = useMemo(() => {
+    const ids = new Set<string>();
+    Object.keys(frames).forEach((id) => ids.add(id));
+    (irDevicesData ?? []).forEach((d) => ids.add(d.device_id));
+    return Array.from(ids).sort();
+  }, [frames, irDevicesData]);
+
+  const deviceOptions = allDeviceIds.map((id) => {
+    const hasFrame = !!frames[id];
+    const label = irNameMap.get(id) ?? id;
+    return {
+      value: id,
+      label: (
+        <Space size={4}>
+          <Tag color={hasFrame ? 'green' : 'default'} style={{ marginRight: 0 }}>
+            {hasFrame ? '在線' : '離線'}
+          </Tag>
+          <span>{label}</span>
+        </Space>
+      ),
+    };
+  });
+
   const frame = selectedDevice ? frames[selectedDevice] : null;
-
-  const deviceOptions = deviceList.map((id) => ({
-    value: id,
-    label: irNameMap.get(id) ?? id,
-  }));
+  const onlineCount = Object.keys(frames).length;
 
   return (
     <Spin spinning={false}>
@@ -160,34 +145,34 @@ export default function ThermalView() {
           熱力圖即時監控
         </Title>
         <Badge
-          status={connected ? 'success' : 'error'}
+          status={activeConnections > 0 ? 'success' : 'error'}
           text={
             <Text type="secondary" style={{ fontSize: 12 }}>
-              SSE {connected ? '已連線' : '未連線'}
+              SSE {activeConnections}/{totalConnections} Edge 連線中
             </Text>
           }
         />
       </div>
 
       <Space style={{ marginBottom: 16 }} wrap>
-        {/* M-PM-158 multi-edge SSE Edge selector */}
-        <Select
-          style={{ width: 320 }}
-          value={selectedEdge}
-          onChange={setSelectedEdge}
-          options={edgeOptions}
-          placeholder="選擇 Edge"
-        />
         <Select
           style={{ width: 360 }}
-          placeholder="選擇 811C 設備"
+          placeholder="選擇 811C 設備（依安裝位置標籤）"
           value={selectedDevice}
           onChange={setSelectedDevice}
           options={deviceOptions}
           notFoundContent="等待 SSE 串流"
+          showSearch
+          optionFilterProp="label"
+          // antd Select 的 label 是 React node 時 search 用 children；用 filterOption 自定
+          filterOption={(input, option) => {
+            const v = option?.value as string | undefined;
+            const name = (v && irNameMap.get(v)) || v || '';
+            return name.toLowerCase().includes(input.toLowerCase());
+          }}
         />
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {deviceList.length} 台上線
+          {onlineCount} / {allDeviceIds.length} 台在線
         </Text>
         {lastUpdate && <Tag color="green">最後更新: {lastUpdate}</Tag>}
       </Space>
@@ -204,7 +189,9 @@ export default function ThermalView() {
       ) : (
         <Card>
           <div style={{ textAlign: 'center', padding: 48, color: '#999' }}>
-            等待 811C SSE 串流資料...
+            {activeConnections === 0
+              ? '正在連接 Edge SSE...'
+              : '等待 811C SSE 串流資料... (尚未收到對應 device 的 frame)'}
           </div>
         </Card>
       )}
