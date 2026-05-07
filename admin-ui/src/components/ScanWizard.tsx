@@ -136,13 +136,20 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
   }, [stopPolling]);
 
   const inferDefaults = useCallback((devices: EmsDevice[]) => {
-    const real = devices.filter((d) => d.device_type !== '_placeholder');
+    // M-P11-052 修：useEdgeDevices 改用 GET /v1/admin/devices 後 device_type 不再可靠
+    // （V2-final backend 只存 device_kind = 'modbus_meter' 等寬泛分類；不存 cpm12d/cpm23/aem_drb fine-grained）
+    // 改用 device_id prefix filter 排 placeholder + 從 device_id parse device_type
+    const real = devices.filter(
+      (d) => !d.device_id.startsWith('_placeholder') && !d.device_id.startsWith('_scan-'),
+    );
+    const KNOWN_TYPES = ['cpm12d', 'cpm23', 'aem_drb', 'tcs300b03'];
     const entries: ScanPlanEntry[] = real.map((d, i) => {
-      const match = d.device_id.match(/slave(\d+)/);
+      const slaveMatch = d.device_id.match(/slave(\d+)/);
+      const typeMatch = KNOWN_TYPES.find((t) => d.device_id.startsWith(`${t}-`));
       return {
         key: i + 1,
-        slave_id: match ? parseInt(match[1], 10) : i + 1,
-        device_type: d.device_type,
+        slave_id: slaveMatch ? parseInt(slaveMatch[1], 10) : i + 1,
+        device_type: typeMatch ?? d.device_type ?? 'cpm12d',
       };
     });
     nextKeyRef.current = entries.length + 1;

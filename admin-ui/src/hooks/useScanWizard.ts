@@ -5,9 +5,25 @@ import { queryKeys } from '../lib/queryClient';
 export interface EmsDevice {
   device_id: string;
   edge_id: string;
-  device_type: string;
-  device_name: string | null;
-  created_at: string;
+  /**
+   * V2-final backend 真實 schema 欄位（GET /v1/admin/devices 回的；對齊 ems_device.device_kind CHECK）
+   * 值域：modbus_meter / thermal / relay / bacnet / other；本欄位用於 filter / 顯示
+   */
+  device_kind?: string;
+  display_name?: string | null;
+  model_id?: number | null;
+  config_version?: number;
+  enabled?: boolean;
+  /**
+   * @deprecated V1 schema；V2-final backend GET /v1/admin/devices 不回此欄位
+   * useEdgeDevices queryFn 透過 transform 從 device_kind 派生（保 backward compat for ScanWizard
+   * inferDefaults 既有 `device_type !== '_placeholder'` filter，本身不準確；改用 device_id prefix）
+   */
+  device_type?: string;
+  /** @deprecated 同上；fallback 值 = display_name */
+  device_name?: string | null;
+  /** V2-final backend 不回；保 optional 不破壞 ScanWizard 既有 column 顯示 */
+  created_at?: string;
 }
 
 export type CommandStatus =
@@ -90,15 +106,32 @@ export function useEdgeDevices(edgeId: string | null) {
       : ['devices', 'edge', 'none'],
     queryFn: async ({ signal }): Promise<EmsDevice[]> => {
       if (!edgeId) return [];
-      // M-PM-123 同 useEdges 修法：abort signal + 顯式 10s timeout + console.error trace
-      // 對齊老王 2026-05-06 chat 「展開 + 按鈕後子表載入中 >1 min」regression（curl 證實 backend <1ms 200 null）
+      // M-PM-149 / M-P11-052 採證後修：原 path `/admin/edges/{id}/devices` (V1 router) V2-final 404
+      // 改用 `GET /v1/admin/devices?edge_id={id}` (v1_admin.py L263 query filter)
+      // 同時 transform backend `device_kind`/`display_name` → frontend `device_type`/`device_name`
+      // 保 backward compat for ScanWizard.inferDefaults（filter `_placeholder` device_id prefix）
+      // 與 EdgeDevicesTable column render
       const t0 = Date.now();
       try {
-        const { data } = await api.get<EmsDevice[]>(`/admin/edges/${edgeId}/devices`, {
+        const { data } = await api.get<Array<Record<string, unknown>>>('/admin/devices', {
+          params: { edge_id: edgeId },
           signal,
           timeout: 10000,
         });
-        return Array.isArray(data) ? data : [];
+        const list = Array.isArray(data) ? data : [];
+        return list.map((d) => ({
+          device_id: String(d.device_id ?? ''),
+          edge_id: String(d.edge_id ?? edgeId),
+          device_kind: d.device_kind as string | undefined,
+          display_name: (d.display_name ?? null) as string | null,
+          model_id: (d.model_id ?? null) as number | null,
+          config_version: (d.config_version ?? 0) as number,
+          enabled: (d.enabled ?? true) as boolean,
+          // backward-compat alias：device_type 從 display_name / device_id 推；
+          // backend V2-final 不存 fine-grained type（cpm12d/cpm23/aem_drb），用 device_kind 概括
+          device_type: (d.device_kind as string | undefined) ?? '',
+          device_name: (d.display_name ?? null) as string | null,
+        }));
       } catch (err) {
         console.error('[useEdgeDevices] fetch failed', {
           edgeId,
