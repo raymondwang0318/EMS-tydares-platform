@@ -324,6 +324,9 @@ async def list_edge_devices(
             "model_id": dev.model_id,
             "enabled": dev.enabled,
             "config_version": dev.config_version,
+            # M-PM-154 supplement: 補 created_at / updated_at（admin-ui Edge 管理頁「建立時間」欄）
+            "created_at": dev.created_at.isoformat() if dev.created_at else None,
+            "updated_at": dev.updated_at.isoformat() if dev.updated_at else None,
             "modbus": None,
             "thermal": None,
         }
@@ -439,6 +442,8 @@ async def create_device(body: dict[str, Any] = Body(...), db: AsyncSession = Dep
     return {"status": "created", "device_id": device_id, "edge_config_version": new_version}
 
 
+# M-PM-151 fix: 加 PUT 同實作（admin-ui frontend 用 PUT method；既有 PATCH 保留向下相容）
+@router.put("/devices/{device_id}")
 @router.patch("/devices/{device_id}")
 async def update_device(
     device_id: str,
