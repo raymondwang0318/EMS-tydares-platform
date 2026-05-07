@@ -258,6 +258,84 @@ async def confirm_devices(
     }
 
 
+# ========== Edge-scoped device listing (admin-ui Edges 頁展開用) ==========
+# M-PM-150 fix: admin-ui 呼叫 GET /v1/admin/edges/{edge_id}/devices 但 endpoint 缺實作
+# → 404；本 endpoint 含 modbus + thermal 子表 LEFT JOIN；filter placeholder
+
+@router.get("/edges/{edge_id}/devices")
+async def list_edge_devices(
+    edge_id: str,
+    include_placeholder: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """查某 Edge 下所有設備清單（含 modbus + thermal 子表 metadata）.
+
+    Args:
+        edge_id: 目標 Edge
+        include_placeholder: 是否含 `_placeholder_*` row（admin-ui 預設不顯示）
+
+    Returns:
+        [{ device_id, edge_id, device_kind, display_name, enabled, config_version,
+           model_id, modbus: {...}|null, thermal: {...}|null }, ...]
+    """
+    # 確認 edge 存在
+    edge = await db.get(EmsEdge, edge_id)
+    if not edge:
+        raise HTTPException(status_code=404, detail=f"edge {edge_id} not found")
+
+    stmt = select(EmsDevice).where(
+        EmsDevice.edge_id == edge_id,
+        EmsDevice.deleted_at.is_(None),
+    )
+    devices = (await db.execute(stmt)).scalars().all()
+
+    if not include_placeholder:
+        devices = [d for d in devices if not d.device_id.startswith("_")]
+
+    result: list[dict[str, Any]] = []
+    for dev in devices:
+        item: dict[str, Any] = {
+            "device_id": dev.device_id,
+            "edge_id": dev.edge_id,
+            "device_kind": dev.device_kind,
+            "display_name": dev.display_name,
+            "model_id": dev.model_id,
+            "enabled": dev.enabled,
+            "config_version": dev.config_version,
+            "modbus": None,
+            "thermal": None,
+        }
+
+        # Modbus 子表（modbus_meter 設備）
+        if dev.device_kind == "modbus_meter":
+            mb = await db.get(EmsDeviceModbus, dev.device_id)
+            if mb:
+                item["modbus"] = {
+                    "slave_id": mb.slave_id,
+                    "bus_id": mb.bus_id,
+                    "transport": mb.transport,
+                    "tcp_host": mb.tcp_host,
+                    "tcp_port": mb.tcp_port,
+                    "poll_interval_sec": mb.poll_interval_sec,
+                    "endianness": mb.endianness,
+                }
+
+        # Thermal 子表（thermal 設備）
+        if dev.device_kind == "thermal":
+            th = await db.get(EmsDeviceThermal, dev.device_id)
+            if th:
+                # 動態抓所有欄位（避免 schema 變動 break）
+                item["thermal"] = {
+                    c.name: getattr(th, c.name)
+                    for c in th.__table__.columns
+                    if c.name != "device_id"
+                }
+
+        result.append(item)
+
+    return {"edge_id": edge_id, "devices": result, "count": len(result)}
+
+
 # ========== /admin/devices ==========
 
 @router.get("/devices")
