@@ -16,6 +16,7 @@ import { ThermalDisplay } from '../components/thermal/ThermalDisplay';
 import { normalizeIrdata, computeSummary } from '../utils/thermalProcessor';
 import { thermalSSEClient } from '../services/thermalSource';
 import { useIrDevices, irDisplayLabel } from '../hooks/useIrDevices';
+import { useEdges } from '../hooks/useEdges';
 
 const { Title, Text } = Typography;
 
@@ -28,7 +29,14 @@ type FrameState = {
   summary: ThermalSummary;
 };
 
+const EDGE_VIA_CENTRAL = '__central__';
+
 export default function ThermalView() {
+  // M-PM-158 multi-edge：Edge selector 切 SSE 來源
+  // - 'central' (default) → 走 nginx `/stream/811c` proxy（hardcoded → E66；M-PM-133 §3.2 single-edge backcompat）
+  // - 個別 edge_id → 直連 Edge LAN `http://{last_seen_ip}:8080/stream/811c`（CORS 已驗 ACAO=*）
+  // 採證 M-PM-158 §2.3：Edge04 SSE GET 帶 Origin → 200 + ACAO * → CORS 不阻塞
+  const [selectedEdge, setSelectedEdge] = useState<string>(EDGE_VIA_CENTRAL);
   const [frames, setFrames] = useState<Record<string, FrameState>>({});
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>();
   const [lastUpdate, setLastUpdate] = useState('');
@@ -36,6 +44,7 @@ export default function ThermalView() {
 
   // 對齊 admin-ui IR 標籤頁的 display_name
   const { data: irDevicesData } = useIrDevices();
+  const { data: edgesData } = useEdges();
   const irNameMap = useMemo(() => {
     const m = new Map<string, string>();
     (irDevicesData ?? []).forEach((d, idx) => {
@@ -43,6 +52,37 @@ export default function ThermalView() {
     });
     return m;
   }, [irDevicesData]);
+
+  // M-PM-158 active edges 為 Edge selector 選項（approved / maintenance；含 hostname for tooltip）
+  const edgeOptions = useMemo(() => {
+    const active = (edgesData ?? []).filter(
+      (e) => e.status === 'approved' || e.status === 'maintenance',
+    );
+    return [
+      {
+        value: EDGE_VIA_CENTRAL,
+        label: '全部 Edge（透過 Central nginx）',
+      },
+      ...active.map((e) => ({
+        value: e.edge_id,
+        label: `${e.edge_id}${e.hostname ? ` · ${e.hostname}` : ''}${e.last_seen_ip ? ` (${e.last_seen_ip})` : ''}`,
+      })),
+    ];
+  }, [edgesData]);
+
+  // M-PM-158 dynamic SSE base URL：依 selectedEdge 切換
+  const sseBaseUrl = useMemo(() => {
+    if (selectedEdge === EDGE_VIA_CENTRAL) {
+      // 同 origin → nginx /stream/811c proxy（hardcoded E66 backcompat）
+      return (import.meta.env.VITE_THERMAL_SSE_URL as string | undefined)
+        ?? (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/v\d+$/, '')
+        ?? '';
+    }
+    // 直連特定 Edge LAN
+    const edge = (edgesData ?? []).find((e) => e.edge_id === selectedEdge);
+    if (!edge?.last_seen_ip) return '';
+    return `http://${edge.last_seen_ip}:8080`;
+  }, [selectedEdge, edgesData]);
 
   const handleFrame = useCallback(
     (sseFrame: { device_id: string; ts: string; image?: string; irdata: string; shift: string }) => {
@@ -67,13 +107,23 @@ export default function ThermalView() {
     [],
   );
 
+  // M-PM-158 切 Edge 時：reset frame state（避免顯示舊 Edge 的 frame）
   useEffect(() => {
-    // baseUrl 用空字串（同 origin /stream/811c；nginx port 8080 已 proxy → 192.168.10.180:8080 Pi）
-    const baseUrl = (import.meta.env.VITE_THERMAL_SSE_URL as string | undefined)
-      ?? (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/v\d+$/, '')
-      ?? '';
+    setFrames({});
+    setSelectedDevice(undefined);
+    setLastUpdate('');
+  }, [selectedEdge]);
 
-    thermalSSEClient.connect(baseUrl);
+  useEffect(() => {
+    if (!sseBaseUrl && selectedEdge !== EDGE_VIA_CENTRAL) {
+      // selected edge 但 last_seen_ip 為 null（offline 或未 enroll）→ 不嘗試連
+      console.warn('[ThermalView] selected edge has no last_seen_ip; SSE not connected', selectedEdge);
+      thermalSSEClient.disconnect();
+      setConnected(false);
+      return;
+    }
+
+    thermalSSEClient.connect(sseBaseUrl);
 
     const checkInterval = setInterval(() => {
       setConnected(thermalSSEClient.isConnected);
@@ -86,7 +136,7 @@ export default function ThermalView() {
       unsub();
       thermalSSEClient.disconnect();
     };
-  }, [handleFrame]);
+  }, [sseBaseUrl, selectedEdge, handleFrame]);
 
   const deviceList = Object.keys(frames);
   const frame = selectedDevice ? frames[selectedDevice] : null;
@@ -120,6 +170,14 @@ export default function ThermalView() {
       </div>
 
       <Space style={{ marginBottom: 16 }} wrap>
+        {/* M-PM-158 multi-edge SSE Edge selector */}
+        <Select
+          style={{ width: 320 }}
+          value={selectedEdge}
+          onChange={setSelectedEdge}
+          options={edgeOptions}
+          placeholder="選擇 Edge"
+        />
         <Select
           style={{ width: 360 }}
           placeholder="選擇 811C 設備"
