@@ -73,6 +73,46 @@ _EDGE_ALLOWED_FIELDS = {
 # revoked_at / approved_by — 走 enroll/approve/heartbeat 流程，非 admin-mutable
 
 
+# M-PM-166 重新採證（5/8 12:50）：admin-ui frontend 實際走的是 PATCH /edge-credentials/{id}/hostname
+# 不是我先前修的 PATCH /edges/{id}（M-P12-037 generic 端點仍保留向下相容）
+# legacy admin.py 有此 route 但用 V1 schema (ems_edge_credential) + main.py 未掛
+# 此 endpoint 為 V2 對齊版（UPDATE ems_edge.hostname）
+
+class _RenameEdgeBody(BaseModel):
+    hostname: str
+
+
+@router.patch("/edge-credentials/{edge_id}/hostname")
+async def rename_edge_hostname(
+    edge_id: str,
+    body: _RenameEdgeBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """修改 Edge 的主機名稱（ems_edge.hostname）— admin-ui frontend 實際呼叫路徑.
+
+    M-PM-166 P1 fix（hostname 405 修通；admin-ui Edge 管理頁編輯主機名解封）。
+    """
+    new_name = (body.hostname or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="hostname 不可為空")
+
+    edge = await db.get(EmsEdge, edge_id)
+    if not edge:
+        raise HTTPException(status_code=404, detail=f"edge {edge_id} not found")
+
+    edge.hostname = new_name
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        edge_id=edge_id,
+        actor="admin",
+        message=f"edge hostname renamed",
+        data_json={"hostname": new_name},
+    ))
+    await db.commit()
+    return {"status": "ok", "edge_id": edge_id, "hostname": new_name}
+
+
 @router.put("/edges/{edge_id}")
 @router.patch("/edges/{edge_id}")
 async def update_edge(
