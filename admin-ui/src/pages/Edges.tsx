@@ -175,24 +175,32 @@ export default function Edges() {
         </Button>
       ),
     },
+    // 老王 5/8 chat：「名稱跟主機名的排序對調」 + rename
+    //   名稱 → 設備名稱代號（業主業務命名；中文 OK；對應 edge_name；PUT /v1/admin/edges/{id}）
+    //   主機名 → 主機系統名稱（OS hostname；POSIX / RFC 952 規範）
+    // 對調後順序：Edge ID | 主機系統名稱 | 狀態 | 設備名稱代號 | 指紋 | ...
     {
-      // M-PM-174 T-AdminUI-003：edge_name 加 editable（業務命名；中文 OK；對應 PUT /v1/admin/edges/{id}）
-      title: '名稱',
-      dataIndex: 'edge_name',
-      key: 'edge_name',
-      width: 200,
+      title: '主機系統名稱',
+      dataIndex: 'hostname',
+      key: 'hostname',
+      width: 180,
       render: (v: string | null, record) => (
         <Text
           editable={{
-            tooltip: '點擊編輯業務名稱（可用中文，例如「警衛室 Edge02」）',
+            tooltip: '主機系統名稱（OS hostname）只能含英數字與連字號（POSIX / RFC 952）；中文請改填「設備名稱代號」欄位',
             onChange: async (val: string) => {
               const next = val.trim();
               if (!next || next === (v ?? '')) return;
+              // M-PM-174 §2.2.3: hostname OS 規範守門
+              if (!HOSTNAME_REGEX.test(next)) {
+                message.error('主機系統名稱只能含英數字與連字號（OS hostname 規範）；中文請填「設備名稱代號」欄位');
+                return;
+              }
               try {
-                await renameEdgeName.mutateAsync({ edgeId: record.edge_id, edgeName: next });
-                message.success('名稱已更新');
+                await renameHostname.mutateAsync({ edgeId: record.edge_id, hostname: next });
+                message.success('主機系統名稱已更新');
               } catch (e) {
-                message.error(`更新名稱失敗：${(e as Error).message}`);
+                message.error(`更新主機系統名稱失敗：${(e as Error).message}`);
               }
             },
           }}
@@ -217,27 +225,23 @@ export default function Edges() {
       onFilter: (value, record) => record.status === value,
     },
     {
-      title: '主機名',
-      dataIndex: 'hostname',
-      key: 'hostname',
-      width: 180,
+      // M-PM-174 T-AdminUI-003：edge_name 加 editable（業務命名；中文 OK；對應 PUT /v1/admin/edges/{id}）
+      title: '設備名稱代號',
+      dataIndex: 'edge_name',
+      key: 'edge_name',
+      width: 200,
       render: (v: string | null, record) => (
         <Text
           editable={{
-            tooltip: '主機名（OS hostname）只能含英數字與連字號（POSIX / RFC 952）；中文請改填「名稱」欄位',
+            tooltip: '點擊編輯設備名稱代號（業務命名；可用中文，例如「警衛室 Edge02」）',
             onChange: async (val: string) => {
               const next = val.trim();
               if (!next || next === (v ?? '')) return;
-              // M-PM-174 §2.2.3: hostname OS 規範守門
-              if (!HOSTNAME_REGEX.test(next)) {
-                message.error('主機名只能含英數字與連字號（OS hostname 規範）；中文請填「名稱」欄位');
-                return;
-              }
               try {
-                await renameHostname.mutateAsync({ edgeId: record.edge_id, hostname: next });
-                message.success('主機名稱已更新');
+                await renameEdgeName.mutateAsync({ edgeId: record.edge_id, edgeName: next });
+                message.success('設備名稱代號已更新');
               } catch (e) {
-                message.error(`更新主機名稱失敗：${(e as Error).message}`);
+                message.error(`更新設備名稱代號失敗：${(e as Error).message}`);
               }
             },
           }}
