@@ -238,10 +238,12 @@ export function energyPointsToRows(
     const metricKey = codeToKey.get(p.parameter_code);
     if (!metricKey) return; // 未在 mapping 中的 metric 略過
     const row = byTs.get(p.ts) ?? {};
-    // energy_kwh 偏好 energy_delta（累積差）；其他用 avg_value
+    // 老王 5/8 chat：「優先處理 kwh 顯示問題」+ M-PM-161 §AC 5 / M-PM-162 §4.2 規範：
+    // energy_kwh 顯**累積值**（last_value 電表面板數；如 1739.x kWh）；不顯 per-period delta
+    // 其他 metric 用 avg_value（既有）
     let value: number | null;
     if (metricKey === 'energy_kwh') {
-      value = p.energy_delta ?? p.avg_value;
+      value = p.last_value ?? p.avg_value;
     } else {
       value = p.avg_value ?? p.last_value ?? p.first_value;
     }

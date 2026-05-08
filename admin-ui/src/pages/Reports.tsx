@@ -466,10 +466,17 @@ export default function Reports() {
       })),
     [energyPoints],
   );
-  const totalKwh = useMemo(
-    () => energyPoints.reduce((s, p) => s + (p.energy_delta ?? 0), 0),
-    [energyPoints],
-  );
+  // 老王 5/8 chat / M-PM-161 §AC 5 / M-PM-162 §4.2：「時段總用電量」= 全期累積差（last 點 - first 點）
+  // 不再 sum(energy_delta)；改用累積值（last_value）first vs last 差；對齊老王讀電表面板數的直覺
+  const totalKwh = useMemo(() => {
+    if (energyPoints.length === 0) return 0;
+    // 找出 ts 排序前後 last_value，計算累積差
+    const sorted = [...energyPoints].sort((a, b) => a.ts.localeCompare(b.ts));
+    const firstLast = sorted[0]?.last_value ?? sorted[0]?.avg_value ?? 0;
+    const lastLast = sorted[sorted.length - 1]?.last_value ?? sorted[sorted.length - 1]?.avg_value ?? 0;
+    const delta = (lastLast ?? 0) - (firstLast ?? 0);
+    return delta > 0 ? delta : 0; // 防 cagg 邊界 negative；累積值不可能減少
+  }, [energyPoints]);
 
   // ==== Thermal chart/summary 預處理 ====
   const thermalChartData = useMemo(() => {
