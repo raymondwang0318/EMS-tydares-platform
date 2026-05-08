@@ -59,6 +59,67 @@ async def list_edges(db: AsyncSession = Depends(get_db)):
     ]
 
 
+# M-PM-166 fix: 補 PUT /edges/{edge_id} edit hostname / edge_name / site_code 等
+# 對齊 M-PM-151 PUT/PATCH 雙 decorator pattern (admin-ui frontend 用 PUT method)
+# 既有 PATCH 也加（向下相容；如其他 caller 用 PATCH）
+_EDGE_ALLOWED_FIELDS = {
+    "edge_name",      # display name
+    "hostname",       # 機殼主機名 (老王要改的)
+    "site_code",      # 站點代碼
+    "remark_desc",    # 備註
+}
+# 不允許改：edge_id (PK) / token_hash / fingerprint / previous_fingerprints / status /
+# config_version / last_seen_* / registered_at / approved_at / maintenance_at / replaced_at /
+# revoked_at / approved_by — 走 enroll/approve/heartbeat 流程，非 admin-mutable
+
+
+@router.put("/edges/{edge_id}")
+@router.patch("/edges/{edge_id}")
+async def update_edge(
+    edge_id: str,
+    body: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """編輯 Edge admin-mutable 欄位（hostname / edge_name / site_code / remark_desc）.
+
+    M-PM-166 P1 fix（HTTP 405 修通；admin-ui Edge 管理頁編輯主機名解封）。
+
+    Args:
+        edge_id: 目標 Edge
+        body: 含可改欄位（多欄位一次更新）
+    """
+    edge = await db.get(EmsEdge, edge_id)
+    if not edge:
+        raise HTTPException(status_code=404, detail=f"edge {edge_id} not found")
+
+    # 過濾合法欄位
+    update_fields = {k: v for k, v in body.items() if k in _EDGE_ALLOWED_FIELDS}
+    if not update_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no valid fields to update; allowed: {sorted(_EDGE_ALLOWED_FIELDS)}",
+        )
+
+    for k, v in update_fields.items():
+        setattr(edge, k, v)
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        edge_id=edge_id,
+        actor=body.get("actor", "admin"),
+        message=f"edge updated: {sorted(update_fields.keys())}",
+        data_json=body,
+    ))
+    await db.commit()
+
+    return {
+        "status": "updated",
+        "edge_id": edge_id,
+        "updated_fields": sorted(update_fields.keys()),
+    }
+
+
 @router.post("/edges/{edge_id}/devices/bootstrap")
 async def bootstrap_placeholder_device(
     edge_id: str,
