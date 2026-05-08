@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Button, Space, Modal, Form, Input, InputNumber, message, Popconfirm } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -25,6 +25,16 @@ interface CrudTableProps {
   hideEdit?: boolean;
   /** 頁面 header 下的提示文字（例：引導用戶走另一流程） */
   hintText?: React.ReactNode;
+  /**
+   * Toolbar 額外注入點（顯示在「新增」按鈕旁；典型用於 filter Select）
+   * M-PM-176 / T-AdminUI-004 設備管理 Edge filter 下拉用
+   */
+  toolbarExtra?: React.ReactNode;
+  /**
+   * 純 frontend filter（apply 在 fetch 後；不影響 backend 請求）
+   * M-PM-176 / T-AdminUI-004 設備管理頁 Edge filter 用
+   */
+  filterFn?: (row: any) => boolean;
 }
 
 interface FormFieldDef {
@@ -44,6 +54,8 @@ export default function CrudTable({
   hideDelete = false,
   hideEdit = false,
   hintText,
+  toolbarExtra,
+  filterFn,
 }: CrudTableProps) {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,13 +138,22 @@ export default function CrudTable({
   // 若所有操作都被隱藏 → 不顯示操作欄
   const showActionColumn = !hideEdit || !hideDelete;
 
+  // M-PM-176 / T-AdminUI-004：純 frontend filter（filterFn 由 caller 注入）
+  const displayData = useMemo(
+    () => (filterFn ? data.filter(filterFn) : data),
+    [data, filterFn],
+  );
+
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <h2>{title}</h2>
-        {!hideAdd && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
-        )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h2 style={{ margin: 0 }}>{title}</h2>
+        <Space wrap>
+          {toolbarExtra}
+          {!hideAdd && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
+          )}
+        </Space>
       </div>
       {hintText && (
         <div style={{ marginBottom: 16 }}>{hintText}</div>
@@ -140,7 +161,7 @@ export default function CrudTable({
 
       <Table
         columns={showActionColumn ? [...columns, actionColumn] : columns}
-        dataSource={data}
+        dataSource={displayData}
         rowKey={rowKey}
         loading={loading}
         size="middle"
