@@ -212,6 +212,26 @@ export function useRenameEdgeHostname() {
   });
 }
 
+/**
+ * M-PM-174 T-AdminUI-003: 修改 ems_edge.edge_name (業務命名；中文 OK；非 OS hostname)
+ * Backend: PUT /v1/admin/edges/{edge_id} (M-P12-037 補實作；4 欄位允許：edge_name/hostname/site_code/remark_desc)
+ */
+export function useRenameEdgeName() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ edgeId, edgeName }: { edgeId: string; edgeName: string }) => {
+      const { data } = await api.put(
+        `/admin/edges/${edgeId}`,
+        { edge_name: edgeName },
+      );
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.edges.all });
+    },
+  });
+}
+
 export function useRenameDevice() {
   const qc = useQueryClient();
   return useMutation({
