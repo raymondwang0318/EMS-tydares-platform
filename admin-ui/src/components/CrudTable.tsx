@@ -148,15 +148,20 @@ export default function CrudTable({
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>{title}</h2>
-        <Space wrap>
-          {toolbarExtra}
-          {!hideAdd && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
-          )}
-        </Space>
+        {!hideAdd && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
+        )}
       </div>
       {hintText && (
         <div style={{ marginBottom: 16 }}>{hintText}</div>
+      )}
+      {toolbarExtra && (
+        // 老王 5/8 chat：「沒有看到所屬 Edge 下拉選單」
+        // 修：toolbarExtra 從 header 右側（被 space-between 推到視窗外）移到獨立工具列
+        // 顯著位置：hintText 下、Table 上；左對齊；窄螢幕也能見
+        <div style={{ marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {toolbarExtra}
+        </div>
       )}
 
       <Table
