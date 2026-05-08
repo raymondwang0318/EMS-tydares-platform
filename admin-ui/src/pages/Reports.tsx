@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert, Button, Card, Col, DatePicker, Empty, Radio, Row, Select, Space, Spin,
   Statistic, Table, Tabs, Tag, Typography, message,
 } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
 import {
@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 import api from '../services/api';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
+import { useReportExport } from '../hooks/useReportExport';
 // useEdges import 已移除（老王 5/7 校正：IR 不綁 Edge；OptGroup 撤回）
 import {
   useActiveAlerts,
@@ -478,6 +479,46 @@ export default function Reports() {
     return delta > 0 ? delta : 0; // 防 cagg 邊界 negative；累積值不可能減少
   }, [energyPoints]);
 
+  // M-PM-173 / M-PM-159 §AC 2-4: Excel 匯出
+  const { exportToExcel, isExporting } = useReportExport();
+  const handleExportEnergyExcel = useCallback(() => {
+    if (!energyDevice || energyHistoryRows.length === 0) return;
+    const deviceLabel =
+      thermalDevices.find((d) => d.device_id === energyDevice)?.label ??
+      devices.find((d) => d.device_id === energyDevice)?.display_name ??
+      energyDevice;
+    const fmt = (d: dayjs.Dayjs) => d.format('YYYYMMDD-HHmm');
+    const safeName = String(deviceLabel).replace(/[/\\?*:|"<>]/g, '_');
+    const filename = `用電履歷_${safeName}_${energyGranularity}_${fmt(range[0])}_${fmt(range[1])}.xlsx`;
+
+    // 欄位 10 項中文映射（M-PM-173 §2.1）；對齊既有 energyColumns 結構
+    exportToExcel({
+      rows: energyHistoryRows,
+      columns: energyColumns.map((c) => ({
+        key: c.key as string,
+        header: c.title,
+        render: (row) => {
+          const v = (row as Record<string, unknown>)[c.key as string];
+          if (v == null) return '';
+          if (typeof v === 'number' && c.precision != null) return v.toFixed(c.precision);
+          return String(v);
+        },
+        width: c.width ? Math.max(8, Math.floor(c.width / 8)) : undefined,
+      })),
+      filename,
+      sheetName: 'Energy',
+    });
+  }, [
+    energyDevice,
+    energyHistoryRows,
+    energyColumns,
+    energyGranularity,
+    range,
+    devices,
+    thermalDevices,
+    exportToExcel,
+  ]);
+
   // ==== Thermal chart/summary 預處理 ====
   const thermalChartData = useMemo(() => {
     const byDay = new Map<string, { ts: string; avg?: number; max?: number; min?: number }>();
@@ -743,6 +784,15 @@ export default function Reports() {
                     disabled={!energyDevice || (energyDeviceIsAem && effectiveViewMode === 'circuit' && !energyCircuitId)}
                   >
                     查詢
+                  </Button>
+                  {/* M-PM-173 / M-PM-159 §AC 2-4: Excel 匯出（純前端 SheetJS）*/}
+                  <Button
+                    icon={<DownloadOutlined />}
+                    onClick={handleExportEnergyExcel}
+                    loading={isExporting}
+                    disabled={!energyDevice || energyHistoryRows.length === 0}
+                  >
+                    📥 匯出 Excel
                   </Button>
                 </Space>
                 {energyError && (
