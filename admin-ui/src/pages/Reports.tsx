@@ -319,7 +319,7 @@ export default function Reports() {
       { key: 'current', title: '電流', unit: 'A', precision: 2, width: 90 },
       { key: 'power_total', title: '總功率', unit: 'W', precision: 0, width: 100 },
       { key: 'power_factor', title: '功率因數', precision: 3, width: 100 },
-      { key: 'energy_kwh', title: '累積用電', unit: 'kWh', precision: 3, width: 110 },
+      { key: 'energy_kwh', title: '累積用電', unit: 'kWh', precision: 1, width: 110 },
     ],
     [],
   );
@@ -762,7 +762,7 @@ export default function Reports() {
                       <Statistic
                         title="時段總用電量"
                         value={totalKwh}
-                        precision={3}
+                        precision={1}
                         suffix="kWh"
                       />
                       {energyQueriedRange && (
