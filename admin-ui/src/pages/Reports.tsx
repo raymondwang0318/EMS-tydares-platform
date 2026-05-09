@@ -493,11 +493,12 @@ export default function Reports() {
     const filename = `用電履歷_${safeName}_${energyGranularity}_${fmt(range[0])}_至_${fmt(range[1])}.xlsx`;
 
     // 欄位 10 項中文映射（M-PM-173 §2.1）；對齊既有 energyColumns 結構
+    // 老王 5/9 chat：「Excel 標題列也要跟 UI 上顯示一樣包含單位『電壓(V)』」
     exportToExcel({
       rows: energyHistoryRows,
       columns: energyColumns.map((c) => ({
         key: c.key as string,
-        header: c.title,
+        header: c.unit ? `${c.title} (${c.unit})` : c.title,
         render: (row) => {
           const v = (row as Record<string, unknown>)[c.key as string];
           if (v == null) return '';
