@@ -735,33 +735,11 @@ export default function Reports() {
     <div>
       <Title level={3} style={{ marginTop: 0 }}>報表</Title>
       <Tabs
-        defaultActiveKey="events"
+        defaultActiveKey="energy"
         items={[
           {
-            key: 'events',
-            label: '事件 Events',
-            children: (
-              <>
-                <Space style={{ marginBottom: 16 }}>
-                  {renderRange()}
-                  <Button type="primary" icon={<ReloadOutlined />} onClick={fetchEvents}>
-                    查詢
-                  </Button>
-                </Space>
-                <Table<EventRow>
-                  columns={eventColumns}
-                  dataSource={events}
-                  rowKey={(r) => String(r.event_id ?? `${r.ts}-${r.edge_id}-${r.device_id}`)}
-                  loading={eventsLoading}
-                  size="small"
-                  pagination={{ pageSize: 20 }}
-                />
-              </>
-            ),
-          },
-          {
             key: 'energy',
-            label: '能量 Energy',
+            label: '用電數據 Energy',
             children: (
               <>
                 <Space style={{ marginBottom: 16 }} wrap>
@@ -1006,6 +984,28 @@ export default function Reports() {
                       description="累積能量差通常 15min+ 粒度才精確（DLC backlog）；如需精確累計差請切 15min 或 1day。"
                     />
                   )}
+              </>
+            ),
+          },
+          {
+            key: 'events',
+            label: '事件 Events',
+            children: (
+              <>
+                <Space style={{ marginBottom: 16 }}>
+                  {renderRange()}
+                  <Button type="primary" icon={<ReloadOutlined />} onClick={fetchEvents}>
+                    查詢
+                  </Button>
+                </Space>
+                <Table<EventRow>
+                  columns={eventColumns}
+                  dataSource={events}
+                  rowKey={(r) => String(r.event_id ?? `${r.ts}-${r.edge_id}-${r.device_id}`)}
+                  loading={eventsLoading}
+                  size="small"
+                  pagination={{ pageSize: 20 }}
+                />
               </>
             ),
           },
