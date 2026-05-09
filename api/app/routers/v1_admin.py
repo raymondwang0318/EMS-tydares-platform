@@ -485,6 +485,9 @@ async def list_devices(
             "model_id": d.model_id,
             "config_version": d.config_version,
             "enabled": d.enabled,
+            # T-AdminUI-001 補（M-PM-207；對齊 V1 path GET /admin/edges/{id}/devices M-PM-154 pattern）
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
         for d in rows
     ]
