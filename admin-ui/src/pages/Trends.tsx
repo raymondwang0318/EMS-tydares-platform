@@ -30,6 +30,8 @@ import {
   demandMappingToCodes,
   type PhaseMode,
 } from '../hooks/useEnergyReport';
+// M-PM-205: Edge filter（對齊報表頁 pattern；老王 5/9 16:50 chat）
+import { useEdges } from '../hooks/useEdges';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -41,9 +43,11 @@ interface DeviceRow {
   display_name?: string | null;
 }
 
+const TRENDS_EDGE_FILTER_ALL = '__ALL__';
+
 export default function Trends() {
   const [range, setRange] = useState<[Dayjs, Dayjs]>([dayjs().subtract(24, 'hour'), dayjs()]);
-  const [devices, setDevices] = useState<DeviceRow[]>([]);
+  const [allDevices, setAllDevices] = useState<DeviceRow[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [device, setDevice] = useState<string | undefined>();
   const [granularity, setGranularity] = useState<Granularity>('15min');
@@ -51,6 +55,9 @@ export default function Trends() {
   const [viewMode, setViewMode] = useState<'device' | 'circuit'>('device');
   const [circuitId, setCircuitId] = useState<string | undefined>();
   const [queriedRange, setQueriedRange] = useState<[Dayjs, Dayjs] | null>(null);
+  // M-PM-205：Edge filter
+  const [edgeFilter, setEdgeFilter] = useState<string>(TRENDS_EDGE_FILTER_ALL);
+  const { data: edgesData } = useEdges();
 
   // 載設備清單
   useEffect(() => {
@@ -58,11 +65,43 @@ export default function Trends() {
     api.get('/admin/devices')
       .then((r) => {
         const items: DeviceRow[] = Array.isArray(r.data) ? r.data : r.data?.items ?? [];
-        setDevices(items.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'));
+        setAllDevices(items.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'));
       })
-      .catch(() => setDevices([]))
+      .catch(() => setAllDevices([]))
       .finally(() => setDevicesLoading(false));
   }, []);
+
+  // M-PM-205：filter by Edge
+  const devices = useMemo(
+    () =>
+      edgeFilter === TRENDS_EDGE_FILTER_ALL
+        ? allDevices
+        : allDevices.filter((d) => d.edge_id === edgeFilter),
+    [allDevices, edgeFilter],
+  );
+
+  // M-PM-205：Edge filter options（只列有 modbus_meter 的 Edge）
+  const edgeOptions = useMemo(() => {
+    const opts: { value: string; label: React.ReactNode }[] = [
+      { value: TRENDS_EDGE_FILTER_ALL, label: '全部 Edge' },
+    ];
+    const edgesWithMeter = new Set(allDevices.map((d) => d.edge_id).filter(Boolean));
+    (edgesData ?? []).forEach((e) => {
+      if (!edgesWithMeter.has(e.edge_id)) return;
+      opts.push({
+        value: e.edge_id,
+        label: (
+          <Space size={4}>
+            <span>{e.edge_id}</span>
+            {e.edge_name && e.edge_name !== e.edge_id && (
+              <Text type="secondary" style={{ fontSize: 11 }}>· {e.edge_name}</Text>
+            )}
+          </Space>
+        ),
+      });
+    });
+    return opts;
+  }, [edgesData, allDevices]);
 
   useEffect(() => {
     if (devices.length && !device) setDevice(devices[0].device_id);
@@ -185,6 +224,22 @@ export default function Trends() {
           showTime
           value={range}
           onChange={(v) => v && v[0] && v[1] && setRange([v[0], v[1]])}
+        />
+        {/* M-PM-205: Edge filter（對齊報表頁 pattern；老王 5/9 16:50 chat）*/}
+        <Select
+          style={{ minWidth: 180 }}
+          value={edgeFilter}
+          onChange={(v) => {
+            setEdgeFilter(v);
+            // 切 Edge 時 reset device / circuit / view
+            setDevice(undefined);
+            setCircuitId(undefined);
+            setViewMode('device');
+          }}
+          options={edgeOptions}
+          showSearch
+          optionFilterProp="value"
+          placeholder="所屬 Edge"
         />
         <Select
           style={{ minWidth: 220 }}
