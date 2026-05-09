@@ -8,6 +8,7 @@ import ModbusModels from './pages/ModbusModels';
 import Ecsu from './pages/Ecsu';
 import BillingStandard from './pages/BillingStandard';
 import Reports from './pages/Reports';
+import Trends from './pages/Trends';   // M-PM-202: 趨勢圖獨立分項
 import IrDevices from './pages/IrDevices';
 import ThermalView from './pages/ThermalView';
 
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="/ir-devices" element={<IrDevices />} />
           <Route path="/thermal/all" element={<ThermalView />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/trends" element={<Trends />} />
           <Route path="/config" element={<ConfigPlaceholder />} />
           <Route path="*" element={<NotFound />} />
         </Route>

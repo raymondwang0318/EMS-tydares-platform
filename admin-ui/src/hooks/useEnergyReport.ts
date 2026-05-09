@@ -338,6 +338,33 @@ export function demandMappingToCodes(m: DemandMetricMapping): string[] {
 }
 
 /**
+ * M-PM-203：把 demand p metric 合進既有 HistoryRow[]（HistoryTable demand 欄）
+ * - 對齊 ts；找出對應 row；把 avg_value 寫入 row.demand_p
+ * - 若 mapping.p null → 全 row demand_p = null（顯「—」）
+ * - 若 row 對應 ts 在 demandPoints 找不到 → row.demand_p = null
+ */
+export function mergeDemandIntoEnergyRows(
+  rows: import('../components/HistoryTable').HistoryRow[],
+  demandPoints: EnergyPoint[],
+  demandMapping: DemandMetricMapping,
+): import('../components/HistoryTable').HistoryRow[] {
+  if (!demandMapping.p || rows.length === 0) {
+    return rows.map((r) => ({ ...r, demand_p: null }));
+  }
+  // 取 demand p metric 對應 ts → value 的 map
+  const tsToValue = new Map<string, number | null>();
+  demandPoints.forEach((p) => {
+    if (p.parameter_code !== demandMapping.p) return;
+    const v = p.avg_value ?? p.last_value ?? p.first_value;
+    tsToValue.set(p.ts, v);
+  });
+  return rows.map((r) => ({
+    ...r,
+    demand_p: tsToValue.get(r.ts) ?? null,
+  }));
+}
+
+/**
  * 把 EnergyPoint[] 轉成 HistoryRow[]（每 row 對應一 ts；6 column 對應 mapping）
  * 5min/1hr 路徑：avg_value（first/last/energy_delta=null fallback）
  * 15min/1day 路徑：energy 欄位優先 energy_delta（累積差）；其他 metric 用 avg_value

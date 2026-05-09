@@ -38,6 +38,7 @@ import {
   energyPointsToRows,
   inferDemandMapping,
   demandMappingToCodes,
+  mergeDemandIntoEnergyRows,
   type PhaseMode,
 } from '../hooks/useEnergyReport';
 
@@ -360,10 +361,14 @@ export default function Reports() {
   const { data: energyReportData, isLoading: energyHistoryLoading } = useEnergyReport(
     energyReportFilter,
   );
-  const energyHistoryRows: HistoryRow[] = useMemo(() => {
+  // M-PM-203：energyHistoryRows 拆兩階段（raw → merged with demand_p）
+  // raw：原 energyPointsToRows 結果；後段 useMemo 合 demand_p
+  const energyHistoryRowsRaw: HistoryRow[] = useMemo(() => {
     if (!energyReportData) return [];
     return energyPointsToRows(energyReportData.points, energyMapping);
   }, [energyReportData, energyMapping]);
+  // 註：實際 energyHistoryRows 在 demandReportData 之後定義（line ↓）；
+  //     既有 reference 跟先前一致；行為僅多 demand_p 欄位
 
   // ─────────────────────────────────────────────────────────────
   // M-PM-196 §一 / M-PM-198 同 deploy：Demand chart 對接
@@ -394,36 +399,24 @@ export default function Reports() {
       to_ts: energyHistoryRange[1].toISOString(),
     };
   }, [energyDevice, energyHistoryRange, demandParamCodes, energyGranularity]);
-  const { data: demandReportData, isLoading: demandLoading } = useEnergyReport(demandReportFilter);
+  // M-PM-202: chart 已抽至 /trends 頁；本頁仍 fetch demand 用於 HistoryTable demand_p column（M-PM-203）
+  const { data: demandReportData } = useEnergyReport(demandReportFilter);
 
-  // Demand chart data: group by ts → { ts, p, q, s }
-  const demandChartData = useMemo(() => {
-    if (!demandReportData?.points?.length) return [] as { ts: string; p?: number | null; q?: number | null; s?: number | null }[];
-    const byTs = new Map<string, { ts: string; p?: number | null; q?: number | null; s?: number | null }>();
-    demandReportData.points.forEach((p) => {
-      const entry = byTs.get(p.ts) ?? { ts: p.ts };
-      const v = p.avg_value ?? p.last_value ?? p.first_value;
-      if (p.parameter_code === demandMapping.p) entry.p = v;
-      if (p.parameter_code === demandMapping.q) entry.q = v;
-      if (p.parameter_code === demandMapping.s) entry.s = v;
-      byTs.set(p.ts, entry);
-    });
-    return Array.from(byTs.values())
-      .sort((a, b) => a.ts.localeCompare(b.ts))
-      .map((e) => ({
-        ts: dayjs(e.ts).format(
-          energyGranularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm',
-        ),
-        p: e.p,
-        q: e.q,
-        s: e.s,
-      }));
-  }, [demandReportData, demandMapping, energyGranularity]);
+  // M-PM-203: energyHistoryRows 合 demand_p column
+  // - reuse mergeDemandIntoEnergyRows（hook 提供）
+  // - demand p 對應 row.ts 找；無 → null（HistoryTable render 顯「—」）
+  const energyHistoryRows: HistoryRow[] = useMemo(
+    () =>
+      mergeDemandIntoEnergyRows(
+        energyHistoryRowsRaw,
+        demandReportData?.points ?? [],
+        demandMapping,
+      ),
+    [energyHistoryRowsRaw, demandReportData, demandMapping],
+  );
 
-  // demand 是否有 metric 可顯示（driver 軌已落地對應該設備 + circuit）
-  const demandHasMetric = demandParamCodes.length > 0;
-
-  // 6 column 老王指定順序（[[M-PM-092]] §一 採納版）
+  // 7 column 老王指定順序（[[M-PM-092]] §一 + [[M-PM-203]] 加需量）
+  // M-PM-203: 「需量 (W)」加在「累積用電」之後；對接 inferDemandMapping (cpm12d demand_p_total / cpm23 demand_p_sum / aem ma/mb_p_dm)
   const energyColumns: HistoryColumnSpec<HistoryRow>[] = useMemo(
     () => [
       { key: 'voltage', title: '電壓', unit: 'V', precision: 1, width: 90 },
@@ -432,6 +425,7 @@ export default function Reports() {
       { key: 'power_total', title: '總功率', unit: 'W', precision: 0, width: 100 },
       { key: 'power_factor', title: '功率因數', precision: 3, width: 100 },
       { key: 'energy_kwh', title: '累積用電', unit: 'kWh', precision: 1, width: 110 },
+      { key: 'demand_p', title: '需量', unit: 'W', precision: 0, width: 100 },
     ],
     [],
   );
@@ -1012,72 +1006,7 @@ export default function Reports() {
                     )}
                   </Card>
                 )}
-                {/* M-PM-196 §一 / M-PM-198 同 deploy：Demand chart 對接（driver 軌已落地）
-                    - CPM-23 demand_p_sum / demand_q_sum / demand_s_sum
-                    - CPM-12D demand_p_total / demand_q_total / demand_s_total
-                    - AEM ma/mb 主迴路 ma_p_dm / mb_p_dm（既有；q/s 候選擴展）
-                    - 子迴路 / per-phase / 小群組：driver 未落地獨立 demand → 顯 placeholder */}
-                <Card
-                  title="需量趨勢 Demand"
-                  size="small"
-                  style={{ marginTop: 16 }}
-                  extra={
-                    demandHasMetric ? (
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {demandParamCodes.join(' / ')}
-                      </Text>
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        本視角無 demand metric
-                      </Text>
-                    )
-                  }
-                >
-                  {!energyHistoryRange ? (
-                    <Empty description="請按「查詢」載入資料" />
-                  ) : !demandHasMetric ? (
-                    <Empty
-                      description={
-                        <Space direction="vertical" size={4}>
-                          <span>本視角 driver 未落地獨立 demand metric</span>
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            子迴路 / per-phase / 小群組目前無獨立 demand；可切「主迴路 ma/mb」或主設備視角
-                          </Text>
-                        </Space>
-                      }
-                    />
-                  ) : demandLoading ? (
-                    <div style={{ textAlign: 'center', padding: 60 }}>
-                      <Spin />
-                    </div>
-                  ) : demandChartData.length === 0 ? (
-                    <Empty description="時段內無 demand 資料" />
-                  ) : (
-                    <ResponsiveContainer width="100%" height={280}>
-                      <LineChart data={demandChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="ts" />
-                        <YAxis />
-                        <Tooltip
-                          formatter={(v, name) => [
-                            typeof v === 'number' ? v.toFixed(1) : '—',
-                            name,
-                          ]}
-                        />
-                        <Legend />
-                        {demandMapping.p && (
-                          <Line type="monotone" dataKey="p" name="P (主動需量)" stroke="#4caf50" strokeWidth={2} dot={false} />
-                        )}
-                        {demandMapping.q && (
-                          <Line type="monotone" dataKey="q" name="Q (無效需量)" stroke="#1976d2" strokeWidth={2} dot={false} />
-                        )}
-                        {demandMapping.s && (
-                          <Line type="monotone" dataKey="s" name="S (視在需量)" stroke="#ff9800" strokeWidth={2} dot={false} />
-                        )}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                </Card>
+                {/* M-PM-202: Demand chart 已抽出獨立至 /trends 頁（趨勢圖）；本頁聚焦列表查詢 */}
                 {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
                 {/* AEM「依設備」視角：默認顯示主 A 排（ma_*）6 metric；註腳提示 ma/mb 兩排 */}
                 {energyDeviceIsAem && effectiveViewMode === 'device' && (

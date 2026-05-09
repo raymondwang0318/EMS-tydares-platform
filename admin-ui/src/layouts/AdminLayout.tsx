@@ -12,6 +12,7 @@ import {
   SettingOutlined,
   FireOutlined,
   CameraOutlined,
+  LineChartOutlined,
 } from '@ant-design/icons';
 
 // M-PM-201 §1.3: Header 移除（含文字+背景）；只保留 Sider + Content
@@ -27,6 +28,8 @@ const menuItems = [
   { key: '/ir-devices', icon: <FireOutlined />, label: 'IR 標籤管理' },
   { key: '/thermal/all', icon: <CameraOutlined />, label: '熱力圖即時監控' },
   { key: '/reports', icon: <BarChartOutlined />, label: '報表' },
+  // M-PM-202：趨勢圖獨立分項；跟報表同級
+  { key: '/trends', icon: <LineChartOutlined />, label: '趨勢圖' },
   { key: '/config', icon: <SettingOutlined />, label: '系統設定' },
 ];
 
