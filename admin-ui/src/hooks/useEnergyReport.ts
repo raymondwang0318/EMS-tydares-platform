@@ -143,6 +143,19 @@ export function inferEnergyMapping(
     };
   }
   if (deviceId.startsWith('cpm12d-')) {
+    // M-PM-198 §3.4 CPM-12D per-phase（driver 軌已落地 voltage_a/b/c, current_a/b/c, power_*_a/b/c）
+    if (circuitId === 'l1' || circuitId === 'l2' || circuitId === 'l3') {
+      const ph = circuitId === 'l1' ? 'a' : circuitId === 'l2' ? 'b' : 'c';
+      return {
+        voltage: `voltage_${ph}`,
+        frequency: 'frequency',
+        current: `current_${ph}`,
+        power_total: `power_active_${ph}`,
+        power_factor: `power_factor_${ph}`,
+        energy_kwh: 'energy_kwh_total', // 累積電量主迴路單一；per-phase 通常無單獨累積
+      };
+    }
+    // 主迴路（無 circuit / 'main'）
     return {
       voltage: 'voltage_avg',
       frequency: 'frequency',
@@ -153,6 +166,19 @@ export function inferEnergyMapping(
     };
   }
   if (deviceId.startsWith('cpm23-')) {
+    // M-PM-198 §3.3 CPM-23 per-phase（driver 軌已落地 voltage_a/b/c, current_a/b/c, power_active_a/b/c, reactive/apparent/pf 各相）
+    if (circuitId === 'l1' || circuitId === 'l2' || circuitId === 'l3') {
+      const ph = circuitId === 'l1' ? 'a' : circuitId === 'l2' ? 'b' : 'c';
+      return {
+        voltage: `voltage_${ph}`,
+        frequency: 'frequency',
+        current: `current_${ph}`,
+        power_total: `power_active_${ph}`,
+        power_factor: `power_factor_${ph}`,
+        energy_kwh: 'energy_kwh_imp',
+      };
+    }
+    // 主迴路（無 circuit / 'main'）
     return {
       // M-PM-186 §三：1PH=相電壓 / 3PH=線電壓；老王校正規範 → driver 軌採證階段確認 register 命名
       voltage: phaseMode === '1ph' ? 'voltage_avg' : 'voltage_ll_avg',
@@ -165,11 +191,12 @@ export function inferEnergyMapping(
   }
   if (deviceId.startsWith('aem_drb-') && circuitId) {
     // AEM-DRB1 依迴路：
-    //   - circuitId='ma' → 主 A 排完整 6 metric（ma_*）
-    //   - circuitId='mb' → 主 B 排完整 6 metric（mb_*）
-    //   - circuitId='ba{N}' → 主 A 電壓/頻率 + 子迴路 ba{N}_* 4 metric
-    //   - circuitId='bb{N}' → 主 B 電壓/頻率 + 子迴路 bb{N}_* 4 metric
-    // 老王 2026-05-04 chat：「ba* 子迴路帶入 ma；bb* 子迴路帶入 mb」+「Ma & Mb 也必須列入迴路選項」
+    //   - circuitId='ma' / 'mb' → 主 A/B 排完整 6 metric（ma_* / mb_*）
+    //   - circuitId='ma1'~'ma3' / 'mb1'~'mb3' → 主迴路 per-phase（M-PM-198 §3.1）
+    //   - circuitId='ba1'~'ba12' / 'bb1'~'bb12' → 主 A/B 電壓頻率 + 子迴路 4 metric
+    //   - circuitId='ba1_3' / 'ba4_6' / 'ba7_9' / 'ba10_12' / 'bb1_3' ... → 小群組（M-PM-198 §3.2）
+    // 老王 5/4 chat：「ba* 子迴路帶入 ma；bb* 子迴路帶入 mb」+「Ma & Mb 也必須列入迴路選項」
+    // 老王 5/9 chat（M-PM-198）：「增加 Ma1/Ma2/Ma3/Ba1-3/Ba4-6...」→ 對應 driver 軌已落地 +43 metric
     if (circuitId === 'ma') {
       return {
         voltage: 'ma_v_avg',
@@ -188,6 +215,33 @@ export function inferEnergyMapping(
         power_total: 'mb_p_sum',
         power_factor: 'mb_pf',
         energy_kwh: 'mb_ae_imp',
+      };
+    }
+    // 主迴路 per-phase（ma1/ma2/ma3/mb1/mb2/mb3）— M-PM-198 §3.1 driver 已落 ma_v1/i1/p1/q1/s1/pf1 等
+    const perPhaseMatch = circuitId.match(/^(ma|mb)([123])$/);
+    if (perPhaseMatch) {
+      const [, main, n] = perPhaseMatch;
+      return {
+        voltage: `${main}_v${n}`,
+        frequency: `${main}_freq`, // 主迴路頻率共用
+        current: `${main}_i${n}`,
+        power_total: `${main}_p${n}`,
+        power_factor: `${main}_pf${n}`,
+        energy_kwh: `${main}_ae_imp`, // 累積電量主迴路單一；per-phase 通常無單獨累積
+      };
+    }
+    // 小群組（ba1_3 / ba4_6 / ba7_9 / ba10_12 / bb1_3 ...）— M-PM-198 §3.2 driver 已落 _i_avg / _p_sum / _q_sum / _s_sum / _pf_avg / _ae_imp
+    const groupMatch = circuitId.match(/^(ba|bb)(\d+_\d+)$/);
+    if (groupMatch) {
+      const [, side] = groupMatch;
+      const main = side === 'bb' ? 'mb' : 'ma';
+      return {
+        voltage: `${main}_v_avg`,   // 群組無獨立 voltage；繼承主迴路
+        frequency: `${main}_freq`,  // 同上
+        current: `${circuitId}_i_avg`,
+        power_total: `${circuitId}_p_sum`,
+        power_factor: `${circuitId}_pf_avg`,
+        energy_kwh: `${circuitId}_ae_imp`,
       };
     }
     // 子迴路 ba{N} / bb{N}：繼承對應主迴路電壓/頻率 + 子迴路 4 metric
@@ -226,6 +280,61 @@ export function inferEnergyMapping(
 /** 取 mapping 中所有 non-null parameter_code（用於 fetch parameter_codes 參數）*/
 export function mappingToParameterCodes(mapping: EnergyMetricMapping): string[] {
   return Object.values(mapping).filter((v): v is string => !!v);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Demand chart（M-PM-196 §一 / M-PM-198 同 deploy）
+// driver 軌已落地：
+//   CPM-23  → demand_p_sum / demand_q_sum / demand_s_sum / demand_current_a/b/c/avg
+//   CPM-12D → demand_p_total / demand_q_total / demand_s_total / demand_current_a/b/c/avg
+//   AEM-DRB → ma_p_dm / mb_p_dm（M-P10-040 既有）；ma/mb v_dmd/i_dmd 候選擴展
+// ─────────────────────────────────────────────────────────────
+
+export interface DemandMetricMapping {
+  /** 主動需量（kW；P）*/
+  p: string | null;
+  /** 無效需量（kvar；Q）*/
+  q: string | null;
+  /** 視在需量（kVA；S）*/
+  s: string | null;
+}
+
+/**
+ * 由 device_id + circuitId 推 demand 三 metric
+ * - CPM-23 主迴路: demand_p_sum / q_sum / s_sum
+ * - CPM-12D 主迴路: demand_p_total / q_total / s_total
+ * - AEM ma 主迴路: ma_p_dm（既有；q/s 候選）
+ * - AEM mb 主迴路: mb_p_dm
+ * - AEM 分迴路 / 小群組 / per-phase / CPM per-phase：driver 軌未落地獨立 demand → 全 null（UI 顯「—」）
+ */
+export function inferDemandMapping(
+  deviceId: string | undefined,
+  circuitId?: string,
+): DemandMetricMapping {
+  if (!deviceId) return { p: null, q: null, s: null };
+  if (deviceId.startsWith('cpm12d-')) {
+    if (!circuitId || circuitId === 'main') {
+      return { p: 'demand_p_total', q: 'demand_q_total', s: 'demand_s_total' };
+    }
+    return { p: null, q: null, s: null }; // L1/L2/L3 沒獨立 demand
+  }
+  if (deviceId.startsWith('cpm23-')) {
+    if (!circuitId || circuitId === 'main') {
+      return { p: 'demand_p_sum', q: 'demand_q_sum', s: 'demand_s_sum' };
+    }
+    return { p: null, q: null, s: null }; // L1/L2/L3 沒獨立 demand
+  }
+  if (deviceId.startsWith('aem_drb-')) {
+    if (circuitId === 'ma') return { p: 'ma_p_dm', q: null, s: null };
+    if (circuitId === 'mb') return { p: 'mb_p_dm', q: null, s: null };
+    if (!circuitId) return { p: 'ma_p_dm', q: null, s: null }; // 依設備預設 ma
+    return { p: null, q: null, s: null };
+  }
+  return { p: null, q: null, s: null };
+}
+
+export function demandMappingToCodes(m: DemandMetricMapping): string[] {
+  return Object.values(m).filter((v): v is string => !!v);
 }
 
 /**

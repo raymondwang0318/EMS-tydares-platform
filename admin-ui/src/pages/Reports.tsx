@@ -36,6 +36,8 @@ import {
   inferEnergyMapping,
   mappingToParameterCodes,
   energyPointsToRows,
+  inferDemandMapping,
+  demandMappingToCodes,
   type PhaseMode,
 } from '../hooks/useEnergyReport';
 
@@ -315,8 +317,14 @@ export default function Reports() {
 
   // 是否 AEM 設備（決定是否顯示視角 toggle + circuit 下拉）
   const energyDeviceIsAem = (energyDevice ?? '').startsWith('aem_drb-');
-  // 有效視角（CPM 類強制 device；AEM 用使用者選擇）
-  const effectiveViewMode = energyDeviceIsAem ? energyViewMode : 'device';
+  // M-PM-198 §3.3 / §3.4 CPM 也加 per-phase「依迴路」（L1/L2/L3）
+  const energyDeviceIsCpm =
+    (energyDevice ?? '').startsWith('cpm23-') ||
+    (energyDevice ?? '').startsWith('cpm12d-');
+  // 有視角切換能力的設備（AEM 或 CPM）才 enable Radio.Group
+  const energyDeviceHasCircuit = energyDeviceIsAem || energyDeviceIsCpm;
+  // 有效視角（無 sub-circuit 設備強制 device；其他用使用者選擇）
+  const effectiveViewMode = energyDeviceHasCircuit ? energyViewMode : 'device';
 
   // 6 metric mapping per device + 視角 + circuit + phaseMode（M-PM-186 §三）
   const energyMapping = useMemo(
@@ -356,6 +364,64 @@ export default function Reports() {
     return energyPointsToRows(energyReportData.points, energyMapping);
   }, [energyReportData, energyMapping]);
 
+  // ─────────────────────────────────────────────────────────────
+  // M-PM-196 §一 / M-PM-198 同 deploy：Demand chart 對接
+  // - reuse useEnergyReport hook（同一 endpoint；只 parameter_codes 不同）
+  // - mapping 來源 inferDemandMapping（device + circuit）
+  // - chart 顯三條線：P/Q/S
+  // ─────────────────────────────────────────────────────────────
+  const demandMapping = useMemo(
+    () =>
+      inferDemandMapping(
+        energyDevice,
+        effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
+      ),
+    [energyDevice, effectiveViewMode, energyCircuitId],
+  );
+  const demandParamCodes = useMemo(
+    () => demandMappingToCodes(demandMapping),
+    [demandMapping],
+  );
+  const demandReportFilter = useMemo(() => {
+    if (!energyDevice || !energyHistoryRange || demandParamCodes.length === 0) return null;
+    return {
+      granularity: energyGranularity,
+      parameter_codes: demandParamCodes,
+      circuit_id: undefined, // demand metric 用全 parameter_code 直查；不走 circuit prefix LIKE
+      device_ids: [energyDevice],
+      from_ts: energyHistoryRange[0].toISOString(),
+      to_ts: energyHistoryRange[1].toISOString(),
+    };
+  }, [energyDevice, energyHistoryRange, demandParamCodes, energyGranularity]);
+  const { data: demandReportData, isLoading: demandLoading } = useEnergyReport(demandReportFilter);
+
+  // Demand chart data: group by ts → { ts, p, q, s }
+  const demandChartData = useMemo(() => {
+    if (!demandReportData?.points?.length) return [] as { ts: string; p?: number | null; q?: number | null; s?: number | null }[];
+    const byTs = new Map<string, { ts: string; p?: number | null; q?: number | null; s?: number | null }>();
+    demandReportData.points.forEach((p) => {
+      const entry = byTs.get(p.ts) ?? { ts: p.ts };
+      const v = p.avg_value ?? p.last_value ?? p.first_value;
+      if (p.parameter_code === demandMapping.p) entry.p = v;
+      if (p.parameter_code === demandMapping.q) entry.q = v;
+      if (p.parameter_code === demandMapping.s) entry.s = v;
+      byTs.set(p.ts, entry);
+    });
+    return Array.from(byTs.values())
+      .sort((a, b) => a.ts.localeCompare(b.ts))
+      .map((e) => ({
+        ts: dayjs(e.ts).format(
+          energyGranularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm',
+        ),
+        p: e.p,
+        q: e.q,
+        s: e.s,
+      }));
+  }, [demandReportData, demandMapping, energyGranularity]);
+
+  // demand 是否有 metric 可顯示（driver 軌已落地對應該設備 + circuit）
+  const demandHasMetric = demandParamCodes.length > 0;
+
   // 6 column 老王指定順序（[[M-PM-092]] §一 採納版）
   const energyColumns: HistoryColumnSpec<HistoryRow>[] = useMemo(
     () => [
@@ -369,19 +435,53 @@ export default function Reports() {
     [],
   );
 
-  // AEM 26 路選項（主 A/B 各 1 + 子迴路各 12 = 26）
-  // 老王 2026-05-04 chat：「Ma & Mb 也必須列入迴路選項之中」
+  // AEM 完整下拉項（M-PM-198 §2.1）：26 既有 + 14 新加 = 40 個
+  // - 主 A/B 排：ma / mb（各 1）= 2
+  // - 主 A/B 排 per-phase：ma1~ma3 / mb1~mb3（M-PM-198 §3.1；driver 軌已落地）= 6
+  // - 小群組：ba1_3/ba4_6/ba7_9/ba10_12 / bb1_3/bb4_6/bb7_9/bb10_12（M-PM-198 §3.2；driver 軌已落地）= 8
+  // - 分迴路：ba1~ba12 / bb1~bb12（既有）= 24
+  // 老王 5/4 chat「Ma & Mb 必須列入迴路選項」+ 5/9 chat「增加 Ma1/Ma2/Ma3/Ba1-3/Ba4-6...」
   const aemCircuitOptions = useMemo(
     () => {
       const opts: { value: string; label: string }[] = [];
+      // ─ A 排 ─
       opts.push({ value: 'ma', label: 'ma（主 A 排）' });
+      for (let n = 1; n <= 3; n++) opts.push({ value: `ma${n}`, label: `ma${n}（主 A 排 第 ${n} 相）` });
+      opts.push({ value: 'ba1_3', label: 'ba1-3（A 排小群組 1-3）' });
+      opts.push({ value: 'ba4_6', label: 'ba4-6（A 排小群組 4-6）' });
+      opts.push({ value: 'ba7_9', label: 'ba7-9（A 排小群組 7-9）' });
+      opts.push({ value: 'ba10_12', label: 'ba10-12（A 排小群組 10-12）' });
       for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}（A 排第 ${i} 路）` });
+      // ─ B 排 ─
       opts.push({ value: 'mb', label: 'mb（主 B 排）' });
+      for (let n = 1; n <= 3; n++) opts.push({ value: `mb${n}`, label: `mb${n}（主 B 排 第 ${n} 相）` });
+      opts.push({ value: 'bb1_3', label: 'bb1-3（B 排小群組 1-3）' });
+      opts.push({ value: 'bb4_6', label: 'bb4-6（B 排小群組 4-6）' });
+      opts.push({ value: 'bb7_9', label: 'bb7-9（B 排小群組 7-9）' });
+      opts.push({ value: 'bb10_12', label: 'bb10-12（B 排小群組 10-12）' });
       for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}（B 排第 ${i} 路）` });
       return opts;
     },
     [],
   );
+
+  // CPM 系列下拉項（M-PM-198 §2.2 / §2.3）：main + L1/L2/L3 = 4 個
+  const cpmCircuitOptions = useMemo(
+    () => [
+      { value: 'main', label: '主迴路（平均/總和）' },
+      { value: 'l1', label: 'L1（A 相）' },
+      { value: 'l2', label: 'L2（B 相）' },
+      { value: 'l3', label: 'L3（C 相）' },
+    ],
+    [],
+  );
+
+  // 依設備類型決定 circuit options
+  const energyCircuitOptions = useMemo(() => {
+    if (energyDeviceIsAem) return aemCircuitOptions;
+    if (energyDeviceIsCpm) return cpmCircuitOptions;
+    return [];
+  }, [energyDeviceIsAem, energyDeviceIsCpm, aemCircuitOptions, cpmCircuitOptions]);
 
   // T-Reports-001 §AC 2.3 granularity options（穩定 reference 避免 inline array 觸發 ant-d Select 重 mount 時 displayed label 卡舊）
   // 老王 2026-05-04 chat 補校正：「下拉選單顯示沒連動一起變更顯示」
@@ -766,12 +866,16 @@ export default function Reports() {
                     value={energyDevice}
                     onChange={(v) => {
                       setEnergyDevice(v);
-                      // 切設備時 reset circuit / 視角（若新設備非 AEM 則強制 device 視角）
+                      // 切設備時 reset circuit；非 AEM/CPM 強制 device 視角
+                      // M-PM-198：CPM 也有 sub-circuit（L1/L2/L3）；保留 viewMode
                       const isAem = (v ?? '').startsWith('aem_drb-');
-                      if (!isAem) {
+                      const isCpm =
+                        (v ?? '').startsWith('cpm23-') ||
+                        (v ?? '').startsWith('cpm12d-');
+                      if (!isAem && !isCpm) {
                         setEnergyViewMode('device');
-                        setEnergyCircuitId(undefined);
                       }
+                      setEnergyCircuitId(undefined);
                     }}
                     options={energyDevices.map((d) => ({
                       value: d.device_id,
@@ -800,27 +904,29 @@ export default function Reports() {
                       { value: '3ph', label: '3PH' },
                     ]}
                   />
-                  {/* T-Reports-001 §AC 2.3：視角切換 toggle（CPM 類強制 device；AEM 顯示）*/}
+                  {/* T-Reports-001 §AC 2.3 + M-PM-198：視角切換 toggle（CPM/AEM 都 enable；其他強制 device）*/}
                   <Radio.Group
                     value={effectiveViewMode}
                     onChange={(e) => setEnergyViewMode(e.target.value)}
                     optionType="button"
                     buttonStyle="solid"
-                    disabled={!energyDeviceIsAem}
+                    disabled={!energyDeviceHasCircuit}
                     options={[
                       { value: 'device', label: '依設備' },
                       { value: 'circuit', label: '依迴路' },
                     ]}
                   />
-                  {/* AEM 依迴路：circuit 下拉（24 路）*/}
-                  {energyDeviceIsAem && effectiveViewMode === 'circuit' && (
+                  {/* M-PM-198：依迴路 → AEM 40 項 / CPM 4 項（main + L1/L2/L3）*/}
+                  {energyDeviceHasCircuit && effectiveViewMode === 'circuit' && (
                     <Select
-                      style={{ width: 200 }}
+                      style={{ width: 220 }}
                       placeholder="選擇迴路"
                       value={energyCircuitId}
                       onChange={setEnergyCircuitId}
-                      options={aemCircuitOptions}
+                      options={energyCircuitOptions}
                       allowClear
+                      showSearch
+                      optionFilterProp="label"
                     />
                   )}
                   <Button
@@ -832,7 +938,7 @@ export default function Reports() {
                       setEnergyHistoryRange([range[0], range[1]]);
                     }}
                     loading={energyLoading || energyHistoryLoading}
-                    disabled={!energyDevice || (energyDeviceIsAem && effectiveViewMode === 'circuit' && !energyCircuitId)}
+                    disabled={!energyDevice || (energyDeviceHasCircuit && effectiveViewMode === 'circuit' && !energyCircuitId)}
                   >
                     查詢
                   </Button>
@@ -904,27 +1010,71 @@ export default function Reports() {
                     )}
                   </Card>
                 )}
-                {/* M-PM-186 §三 UI 軌（5/9 P11 session D）：需量 Demand chart placeholder
-                    Driver 軌（P10 fork α）採證階段如缺 demand metric → 此處顯「—」；
-                    driver 落地後 demand_xxx / peak_demand_xxx parameter_code 此 chart 自動有資料。
-                    當前: 預留位置；driver 軌完成後改 LineChart 對接 demand metric。 */}
+                {/* M-PM-196 §一 / M-PM-198 同 deploy：Demand chart 對接（driver 軌已落地）
+                    - CPM-23 demand_p_sum / demand_q_sum / demand_s_sum
+                    - CPM-12D demand_p_total / demand_q_total / demand_s_total
+                    - AEM ma/mb 主迴路 ma_p_dm / mb_p_dm（既有；q/s 候選擴展）
+                    - 子迴路 / per-phase / 小群組：driver 未落地獨立 demand → 顯 placeholder */}
                 <Card
                   title="需量趨勢 Demand"
                   size="small"
                   style={{ marginTop: 16 }}
-                  extra={<Text type="secondary" style={{ fontSize: 11 }}>等 Driver 軌落地</Text>}
+                  extra={
+                    demandHasMetric ? (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {demandParamCodes.join(' / ')}
+                      </Text>
+                    ) : (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        本視角無 demand metric
+                      </Text>
+                    )
+                  }
                 >
-                  <Empty
-                    description={
-                      <Space direction="vertical" size={4}>
-                        <span>需量資料尚未對接</span>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          P10 採證 / driver 補 demand register 後（M-PM-186 階段 2 driver 軌）
-                          ，本 chart 將顯示 15 分鐘 / 1 小時 demand 趨勢
-                        </Text>
-                      </Space>
-                    }
-                  />
+                  {!energyHistoryRange ? (
+                    <Empty description="請按「查詢」載入資料" />
+                  ) : !demandHasMetric ? (
+                    <Empty
+                      description={
+                        <Space direction="vertical" size={4}>
+                          <span>本視角 driver 未落地獨立 demand metric</span>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            子迴路 / per-phase / 小群組目前無獨立 demand；可切「主迴路 ma/mb」或主設備視角
+                          </Text>
+                        </Space>
+                      }
+                    />
+                  ) : demandLoading ? (
+                    <div style={{ textAlign: 'center', padding: 60 }}>
+                      <Spin />
+                    </div>
+                  ) : demandChartData.length === 0 ? (
+                    <Empty description="時段內無 demand 資料" />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <LineChart data={demandChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="ts" />
+                        <YAxis />
+                        <Tooltip
+                          formatter={(v, name) => [
+                            typeof v === 'number' ? v.toFixed(1) : '—',
+                            name,
+                          ]}
+                        />
+                        <Legend />
+                        {demandMapping.p && (
+                          <Line type="monotone" dataKey="p" name="P (主動需量)" stroke="#4caf50" strokeWidth={2} dot={false} />
+                        )}
+                        {demandMapping.q && (
+                          <Line type="monotone" dataKey="q" name="Q (無效需量)" stroke="#1976d2" strokeWidth={2} dot={false} />
+                        )}
+                        {demandMapping.s && (
+                          <Line type="monotone" dataKey="s" name="S (視在需量)" stroke="#ff9800" strokeWidth={2} dot={false} />
+                        )}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
                 </Card>
                 {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
                 {/* AEM「依設備」視角：默認顯示主 A 排（ma_*）6 metric；註腳提示 ma/mb 兩排 */}
@@ -937,19 +1087,22 @@ export default function Reports() {
                     description="「依設備」視角默認顯示主 A 排 (ma_*) 6 metric；切「依迴路」可選 ba1~ba12（繼承 ma_v_avg / ma_freq）或 bb1~bb12（繼承 mb_v_avg / mb_freq）。"
                   />
                 )}
-                {/* AEM「依迴路」未選 circuit：提示 */}
-                {energyDeviceIsAem && effectiveViewMode === 'circuit' && !energyCircuitId && (
+                {/* M-PM-198：AEM/CPM「依迴路」未選 circuit：提示 */}
+                {energyDeviceHasCircuit && effectiveViewMode === 'circuit' && !energyCircuitId && (
                   <Alert
                     type="info"
                     showIcon
                     style={{ marginTop: 16 }}
                     message="請選擇迴路"
-                    description="AEM-DRB1 共 24 個迴路（ba1~ba12 → 繼承 ma_v_avg / ma_freq；bb1~bb12 → 繼承 mb_v_avg / mb_freq）；選擇後按「查詢」載入該迴路履歷。"
+                    description={
+                      energyDeviceIsAem
+                        ? 'AEM-DRB1 共 40 個迴路項：主迴路 ma/mb（2）+ 主迴路 per-phase ma1~3/mb1~3（6）+ 小群組 ba1-3/4-6/7-9/10-12 + bb 同（8）+ 分迴路 ba/bb 1~12（24）。'
+                        : 'CPM 共 4 個迴路項：主迴路（main 平均/總和）+ L1/L2/L3（A/B/C 相）。選擇後按「查詢」載入該迴路履歷。'
+                    }
                   />
                 )}
-                {/* CPM 類 + AEM 任何視角（依設備 ma_* / 依迴路已選 circuit）：HistoryTable 6 column */}
-                {/* 老王 2026-05-04 chat 補校正「下拉選單顯示沒連動」→ HistoryTable + 內部 Tag 加 key 強制 re-mount when granularity 變動 */}
-                {(!energyDeviceIsAem || effectiveViewMode === 'device' || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
+                {/* M-PM-198：HistoryTable render 條件擴 CPM；老王 5/4 chat「下拉沒連動」key 重 mount 既有保留 */}
+                {(!energyDeviceHasCircuit || effectiveViewMode === 'device' || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
                   <HistoryTable
                     key={`energy-htbl-${energyGranularity}-${energyDevice}-${energyCircuitId ?? ''}`}
                     columns={energyColumns}
@@ -961,7 +1114,7 @@ export default function Reports() {
                       <Space>
                         <span>
                           用電履歷列表 — {energyDevice ?? '尚未選擇設備'}
-                          {energyDeviceIsAem && effectiveViewMode === 'circuit' && energyCircuitId
+                          {energyDeviceHasCircuit && effectiveViewMode === 'circuit' && energyCircuitId
                             ? ` · ${energyCircuitId}`
                             : ''}
                         </span>
