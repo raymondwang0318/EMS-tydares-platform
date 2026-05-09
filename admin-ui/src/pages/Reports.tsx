@@ -489,7 +489,8 @@ export default function Reports() {
       energyDevice;
     const fmt = (d: dayjs.Dayjs) => d.format('YYYYMMDD-HHmm');
     const safeName = String(deviceLabel).replace(/[/\\?*:|"<>]/g, '_');
-    const filename = `用電履歷_${safeName}_${energyGranularity}_${fmt(range[0])}_${fmt(range[1])}.xlsx`;
+    // 老王 5/9 chat：兩端時分相同（如 09:41→09:41 跨日）視覺像重複；改用「至」中文分隔起迄明示
+    const filename = `用電履歷_${safeName}_${energyGranularity}_${fmt(range[0])}_至_${fmt(range[1])}.xlsx`;
 
     // 欄位 10 項中文映射（M-PM-173 §2.1）；對齊既有 energyColumns 結構
     exportToExcel({
