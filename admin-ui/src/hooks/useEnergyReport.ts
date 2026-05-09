@@ -106,20 +106,31 @@ export interface EnergyMetricMapping {
   energy_kwh: string | null;
 }
 
+/** 1PH / 3PH 視角（M-PM-186 §三 UI 軌新加；T-AdminUI-006 P11 session D）
+ *  - CPM-23 三相 4 線電表：線電壓（voltage_ll_avg）vs 相電壓（voltage_avg）切換
+ *  - CPM-12D 單相 2 線：voltage_avg 不受 phaseMode 影響
+ *  - AEM-DRB1 主迴路電壓 ma_v_avg / mb_v_avg：phaseMode 不影響（per-phase 由 ma/mb 切換決定）
+ */
+export type PhaseMode = '1ph' | '3ph';
+
 /**
  * 由 device_id 推斷 mapping：
- *   - cpm12d 系列 → CPM-12D 完整 6 metric
- *   - cpm23 系列  → CPM-23 完整 6 metric（voltage 用 voltage_ll_avg 線電壓）
+ *   - cpm12d 系列 → CPM-12D 完整 6 metric（單相；phaseMode 不影響）
+ *   - cpm23 系列  → CPM-23 完整 6 metric；voltage 依 phaseMode：
+ *       · '3ph'（預設）→ voltage_ll_avg（線電壓）
+ *       · '1ph' → voltage_avg（相電壓 = 線電壓 / √3）
  *   - aem_drb 系列 + circuit_id（依迴路）→ 主迴路電壓/頻率（ma 系列 / mb 系列）+ 子迴路電流/總功率/功率因數/累積用電
  *     · ba{N}（A 排子迴路）→ voltage=ma_v_avg / frequency=ma_freq / 子迴路 ba{N}_i/_p/_pf/_ae_imp
  *     · bb{N}（B 排子迴路）→ voltage=mb_v_avg / frequency=mb_freq / 子迴路 bb{N}_i/_p/_pf/_ae_imp
  *   - aem_drb 系列 無 circuit_id（依設備）→ 主 A 排 6 metric（後續可加 ma/mb 排切換）
  *
  * 老王 2026-05-04 chat 校正：「沒有將主迴路的電壓/頻率帶入」→ 子迴路繼承對應主迴路 ma 系列 / mb 系列
+ * M-PM-186 §三（5/9）：phaseMode 加入；CPM-23 線/相電壓切換
  */
 export function inferEnergyMapping(
   deviceId: string | undefined,
   circuitId?: string,
+  phaseMode: PhaseMode = '3ph',
 ): EnergyMetricMapping {
   if (!deviceId) {
     return {
@@ -143,7 +154,8 @@ export function inferEnergyMapping(
   }
   if (deviceId.startsWith('cpm23-')) {
     return {
-      voltage: 'voltage_ll_avg',
+      // M-PM-186 §三：1PH=相電壓 / 3PH=線電壓；老王校正規範 → driver 軌採證階段確認 register 命名
+      voltage: phaseMode === '1ph' ? 'voltage_avg' : 'voltage_ll_avg',
       frequency: 'frequency',
       current: 'current_avg',
       power_total: 'power_total',

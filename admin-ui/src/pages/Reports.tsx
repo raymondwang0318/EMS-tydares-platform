@@ -13,7 +13,9 @@ import {
 import api from '../services/api';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
 import { useReportExport } from '../hooks/useReportExport';
-// useEdges import 已移除（老王 5/7 校正：IR 不綁 Edge；OptGroup 撤回）
+// M-PM-186 §三 UI 軌：Energy Tab 加 Edge filter（fleet 5 顆 × ~10 設備需要）；
+// 對齊 ModbusDevices.tsx pattern；IR Thermal 不綁 Edge 不受影響
+import { useEdges } from '../hooks/useEdges';
 import {
   useActiveAlerts,
   useAlertHistory,
@@ -34,6 +36,7 @@ import {
   inferEnergyMapping,
   mappingToParameterCodes,
   energyPointsToRows,
+  type PhaseMode,
 } from '../hooks/useEnergyReport';
 
 const { Title, Text } = Typography;
@@ -163,6 +166,11 @@ export default function Reports() {
   const [energyViewMode, setEnergyViewMode] = useState<'device' | 'circuit'>('device');
   const [energyCircuitId, setEnergyCircuitId] = useState<string | undefined>();
   const [energyHistoryRange, setEnergyHistoryRange] = useState<[Dayjs, Dayjs] | null>(null);
+  // M-PM-186 §三 UI 軌（5/9 P11 session D）：1PH/3PH toggle（CPM-23 線/相電壓切換；CPM-12D 不影響；AEM 不影響）
+  const [energyPhaseMode, setEnergyPhaseMode] = useState<PhaseMode>('3ph');
+  // M-PM-186 §三 UI 軌：Edge filter（fleet 5 顆 × ~10 設備）
+  const ENERGY_EDGE_FILTER_ALL = '__ALL__';
+  const [energyEdgeFilter, setEnergyEdgeFilter] = useState<string>(ENERGY_EDGE_FILTER_ALL);
 
   // Thermal Tab
   const [thermalDevice, setThermalDevice] = useState<string | undefined>();
@@ -204,10 +212,45 @@ export default function Reports() {
   const suppressedEdgeId = edgeDownAlerts[0]?.edge_id ?? null;
 
   // 依 device_kind 分類（Energy 仍從 ems_device modbus_meter）
-  const energyDevices = useMemo(
+  const energyDevicesAll = useMemo(
     () => devices.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'),
     [devices],
   );
+  // M-PM-186 §三 UI 軌：Edge filter（fleet）— 套 edgeFilter state；__ALL__ 顯全部
+  const energyDevices = useMemo(
+    () =>
+      energyEdgeFilter === ENERGY_EDGE_FILTER_ALL
+        ? energyDevicesAll
+        : energyDevicesAll.filter((d) => d.edge_id === energyEdgeFilter),
+    [energyDevicesAll, energyEdgeFilter],
+  );
+
+  // M-PM-186 §三 UI 軌：Edge filter options（從 useEdges + energyDevicesAll 取交集）
+  const { data: edgesData } = useEdges();
+  const energyEdgeOptions = useMemo(() => {
+    const opts: { value: string; label: React.ReactNode }[] = [
+      { value: ENERGY_EDGE_FILTER_ALL, label: '全部 Edge' },
+    ];
+    // 只列**有 modbus_meter 設備**的 Edge（避免下拉空殼）
+    const edgesWithMeter = new Set(energyDevicesAll.map((d) => d.edge_id).filter(Boolean));
+    (edgesData ?? []).forEach((e) => {
+      if (!edgesWithMeter.has(e.edge_id)) return;
+      opts.push({
+        value: e.edge_id,
+        label: (
+          <Space size={4}>
+            <span>{e.edge_id}</span>
+            {e.edge_name && e.edge_name !== e.edge_id && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                · {e.edge_name}
+              </Text>
+            )}
+          </Space>
+        ),
+      });
+    });
+    return opts;
+  }, [edgesData, energyDevicesAll]);
 
   // Thermal Tab 設備清單：用 IrDevice 結構（device_id 為 `811c_<MAC>`；display_name 顯示優先）
   // 依 T-S11C-001 AC 6：MAC 不出現前台；用 display_name 或「未命名 IR-N」
@@ -275,14 +318,15 @@ export default function Reports() {
   // 有效視角（CPM 類強制 device；AEM 用使用者選擇）
   const effectiveViewMode = energyDeviceIsAem ? energyViewMode : 'device';
 
-  // 6 metric mapping per device + 視角 + circuit
+  // 6 metric mapping per device + 視角 + circuit + phaseMode（M-PM-186 §三）
   const energyMapping = useMemo(
     () =>
       inferEnergyMapping(
         energyDevice,
         effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
+        energyPhaseMode,
       ),
-    [energyDevice, effectiveViewMode, energyCircuitId],
+    [energyDevice, effectiveViewMode, energyCircuitId, energyPhaseMode],
   );
 
   // 6 metric → parameter_codes（送 backend）
@@ -722,6 +766,22 @@ export default function Reports() {
               <>
                 <Space style={{ marginBottom: 16 }} wrap>
                   {renderRange()}
+                  {/* M-PM-186 §三 UI 軌：Edge filter（fleet 5 顆 Edge × ~10 設備需要）*/}
+                  <Select
+                    style={{ minWidth: 180 }}
+                    value={energyEdgeFilter}
+                    onChange={(v) => {
+                      setEnergyEdgeFilter(v);
+                      // 切 Edge filter 時 reset device 選擇（避免卡 filter 外設備）
+                      setEnergyDevice(undefined);
+                      setEnergyViewMode('device');
+                      setEnergyCircuitId(undefined);
+                    }}
+                    options={energyEdgeOptions}
+                    showSearch
+                    optionFilterProp="value"
+                    placeholder="所屬 Edge"
+                  />
                   <Select
                     style={{ minWidth: 220 }}
                     placeholder={devicesLoading ? '載入設備中…' : '選擇設備'}
@@ -750,6 +810,17 @@ export default function Reports() {
                     value={energyGranularity}
                     onChange={(v) => setEnergyGranularity(v)}
                     options={energyGranularityOptions}
+                  />
+                  {/* M-PM-186 §三 UI 軌（5/9 P11 session D）：1PH/3PH toggle（cpm23 線/相電壓切換；其他設備不影響）*/}
+                  <Radio.Group
+                    value={energyPhaseMode}
+                    onChange={(e) => setEnergyPhaseMode(e.target.value)}
+                    optionType="button"
+                    buttonStyle="solid"
+                    options={[
+                      { value: '1ph', label: '1PH' },
+                      { value: '3ph', label: '3PH' },
+                    ]}
                   />
                   {/* T-Reports-001 §AC 2.3：視角切換 toggle（CPM 類強制 device；AEM 顯示）*/}
                   <Radio.Group
@@ -855,6 +926,28 @@ export default function Reports() {
                     )}
                   </Card>
                 )}
+                {/* M-PM-186 §三 UI 軌（5/9 P11 session D）：需量 Demand chart placeholder
+                    Driver 軌（P10 fork α）採證階段如缺 demand metric → 此處顯「—」；
+                    driver 落地後 demand_xxx / peak_demand_xxx parameter_code 此 chart 自動有資料。
+                    當前: 預留位置；driver 軌完成後改 LineChart 對接 demand metric。 */}
+                <Card
+                  title="需量趨勢 Demand"
+                  size="small"
+                  style={{ marginTop: 16 }}
+                  extra={<Text type="secondary" style={{ fontSize: 11 }}>等 Driver 軌落地</Text>}
+                >
+                  <Empty
+                    description={
+                      <Space direction="vertical" size={4}>
+                        <span>需量資料尚未對接</span>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          P10 採證 / driver 補 demand register 後（M-PM-186 階段 2 driver 軌）
+                          ，本 chart 將顯示 15 分鐘 / 1 小時 demand 趨勢
+                        </Text>
+                      </Space>
+                    }
+                  />
+                </Card>
                 {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
                 {/* AEM「依設備」視角：默認顯示主 A 排（ma_*）6 metric；註腳提示 ma/mb 兩排 */}
                 {energyDeviceIsAem && effectiveViewMode === 'device' && (
