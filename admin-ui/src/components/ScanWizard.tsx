@@ -29,6 +29,7 @@ import {
   useBootstrapEdgeDevice,
   useConfirmDevices,
   useCreateCommand,
+  useDeleteDevice,
   useEdgeDevices,
   type CommandStatus,
   type ConfirmDevice,
@@ -97,6 +98,8 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
   const bootstrap = useBootstrapEdgeDevice();
   const createCommand = useCreateCommand();
   const confirmDevicesMut = useConfirmDevices();
+  // T-AdminUI-005 (M-PM-188 §2.2): rollback DELETE placeholder hook
+  const deleteDevice = useDeleteDevice();
 
   const [wizardStep, setWizardStep] = useState<WizardStep>('config');
 
@@ -119,6 +122,14 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
   const timerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   const [confirmRows, setConfirmRows] = useState<ConfirmRow[]>([]);
+
+  // T-AdminUI-005 (M-PM-188 §2.2): bootstrap placeholder rollback state
+  // - bootstrappedPlaceholderId: 本 session bootstrap 出的 placeholder device_id（記住才能 rollback）
+  // - confirmedRef: 標記 confirm 已成功；若 true → closeModal 不 rollback
+  // - rollbackingRef: 防止 closeModal 被 rollback 自身觸發遞迴
+  const [bootstrappedPlaceholderId, setBootstrappedPlaceholderId] = useState<string | null>(null);
+  const confirmedRef = useRef(false);
+  const rollbackingRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -171,6 +182,10 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     setScanError(null);
     setElapsedSec(0);
     setConfirmRows([]);
+    // T-AdminUI-005: 重置 rollback state（每次 modal open 都新 session）
+    setBootstrappedPlaceholderId(null);
+    confirmedRef.current = false;
+    rollbackingRef.current = false;
     stopPolling();
 
     const mem = loadTransportMemory(edgeId);
@@ -211,6 +226,8 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
           created_at: new Date().toISOString(),
         };
         devices = [placeholder];
+        // T-AdminUI-005: 記住本 session bootstrap 出的 placeholder；rollback 時 DELETE
+        setBootstrappedPlaceholderId(device_id);
       } catch {
         message.error('建立佔位設備失敗，無法發起掃描。');
         return;
@@ -272,6 +289,16 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
             const result = cmd.result_json as Record<string, unknown> | null;
             setScanError((result?.error as string) || '未知錯誤');
             stopPolling();
+            // T-AdminUI-005 (M-PM-188 §2.2.1): scan FAILED/EXPIRED/CANCELED → 自動 DELETE placeholder
+            // - 不彈 dialog（command 已失敗；老王不需再決定；自動清最徹底）
+            // - 用 setBootstrappedPlaceholderId(null) 跳過後續 closeModal 二次 rollback
+            if (bootstrappedPlaceholderId && !confirmedRef.current) {
+              const id = bootstrappedPlaceholderId;
+              setBootstrappedPlaceholderId(null); // 立即清避免 closeModal 二次彈 dialog
+              performRollback(id).catch(() => {
+                /* performRollback 內已 toast；不再 throw */
+              });
+            }
           }
         } catch {
           /* ignore polling errors */
@@ -322,6 +349,9 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
       message.success(
         `${label}，配置指令已下發 (${res.command_id.slice(0, 8)}...)`,
       );
+      // T-AdminUI-005: confirm 成功 → 標記跳過 rollback
+      // （已成 ems_device 真正 row；prev placeholder 已被 confirm flow 替換 / 不再需 rollback）
+      confirmedRef.current = true;
       stopPolling();
       onClose();
     } catch (err: unknown) {
@@ -331,10 +361,60 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     }
   };
 
-  const closeModal = () => {
+  // T-AdminUI-005 (M-PM-188 §2.2): 內部執行 rollback DELETE placeholder
+  // - best-effort：DELETE 失敗 toast 警告 + console.error 留證；不阻塞 modal 關閉
+  // - 重用 deleteDevice mutation；onSuccess 會 invalidate devices query
+  const performRollback = useCallback(async (placeholderId: string) => {
+    try {
+      await deleteDevice.mutateAsync(placeholderId);
+      message.success(
+        `已自動清除暫存設備 ${placeholderId.slice(0, 16)}…（防 dirty data 累積）`,
+      );
+    } catch (err) {
+      console.error('[ScanWizard] rollback DELETE failed', err);
+      message.warning(
+        `暫存設備清除失敗（${placeholderId.slice(0, 16)}…）；請聯繫 admin 手動清理`,
+      );
+    }
+  }, [deleteDevice, message]);
+
+  const closeModal = useCallback(() => {
     stopPolling();
-    onClose();
-  };
+    // T-AdminUI-005 (M-PM-188 §2.2.2): 取消 wizard → 若有 bootstrap placeholder + 未成功 confirm → confirm dialog 詢問清除
+    // - confirmedRef true（已成功 confirm）→ 直接關閉，不 rollback
+    // - bootstrappedPlaceholderId null（從未 bootstrap）→ 直接關閉，無 rollback 對象
+    // - 其他情況 → 彈 confirm dialog；老王自決清/留
+    if (rollbackingRef.current) {
+      // 防 dialog onOk 內又呼叫 closeModal 遞迴
+      onClose();
+      return;
+    }
+    if (!bootstrappedPlaceholderId || confirmedRef.current) {
+      onClose();
+      return;
+    }
+    rollbackingRef.current = true;
+    Modal.confirm({
+      title: '取消掃描？',
+      content: `偵測到本次有 1 個暫存設備（${bootstrappedPlaceholderId.slice(
+        0,
+        16,
+      )}…）；取消後是否清除？\n\n建議「清除」避免累積 dirty data；「保留」可下次重開 wizard 復用。`,
+      okText: '取消並清除暫存',
+      cancelText: '取消但保留暫存',
+      onOk: async () => {
+        if (bootstrappedPlaceholderId) {
+          await performRollback(bootstrappedPlaceholderId);
+        }
+        rollbackingRef.current = false;
+        onClose();
+      },
+      onCancel: () => {
+        rollbackingRef.current = false;
+        onClose();
+      },
+    });
+  }, [bootstrappedPlaceholderId, onClose, performRollback, stopPolling]);
 
   const addPlanEntry = useCallback(() => {
     setScanPlan((prev) => [

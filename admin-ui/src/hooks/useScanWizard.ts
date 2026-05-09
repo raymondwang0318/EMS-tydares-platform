@@ -159,6 +159,28 @@ export function useBootstrapEdgeDevice() {
   });
 }
 
+/**
+ * T-AdminUI-005 (M-PM-188 §2.2)：ScanWizard rollback DELETE placeholder
+ * - DELETE /v1/admin/devices/{device_id}（v1_admin.py L584 soft_delete_device）
+ * - soft delete（set deleted_at）+ bump config_version
+ * - 用於 wizard scan 失敗 / 老王取消時清 bootstrap placeholder 避免 dirty data 累積
+ * - M-PM-153 ops 一次性清過 24 個；本 hook 防新累積
+ */
+export function useDeleteDevice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (deviceId: string): Promise<{ status: string }> => {
+      const { data } = await api.delete<{ status: string }>(
+        `/admin/devices/${deviceId}`,
+      );
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.devices.all });
+    },
+  });
+}
+
 export function useCreateCommand() {
   return useMutation({
     mutationFn: async (req: CreateCommandRequest): Promise<{ command_id: string }> => {
