@@ -92,7 +92,8 @@ interface ThermalPoint {
 }
 
 const eventColumns: ColumnsType<EventRow> = [
-  { title: '時間', dataIndex: 'ts', key: 'ts', width: 200, render: (v) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '-') },
+  // M-PM-201 §1.1: width 200 → 160（事件 Tab 顯 YYYY-MM-DD HH:mm:ss 留少量空白即可）
+  { title: '時間', dataIndex: 'ts', key: 'ts', width: 160, render: (v) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '-') },
   {
     title: '嚴重度',
     dataIndex: 'severity',
@@ -441,37 +442,38 @@ export default function Reports() {
   // - 小群組：ba1_3/ba4_6/ba7_9/ba10_12 / bb1_3/bb4_6/bb7_9/bb10_12（M-PM-198 §3.2；driver 軌已落地）= 8
   // - 分迴路：ba1~ba12 / bb1~bb12（既有）= 24
   // 老王 5/4 chat「Ma & Mb 必須列入迴路選項」+ 5/9 chat「增加 Ma1/Ma2/Ma3/Ba1-3/Ba4-6...」
+  // M-PM-200: 純代號顯示（去括號 + 括號內中文）
   const aemCircuitOptions = useMemo(
     () => {
       const opts: { value: string; label: string }[] = [];
       // ─ A 排 ─
-      opts.push({ value: 'ma', label: 'ma（主 A 排）' });
-      for (let n = 1; n <= 3; n++) opts.push({ value: `ma${n}`, label: `ma${n}（主 A 排 第 ${n} 相）` });
-      opts.push({ value: 'ba1_3', label: 'ba1-3（A 排小群組 1-3）' });
-      opts.push({ value: 'ba4_6', label: 'ba4-6（A 排小群組 4-6）' });
-      opts.push({ value: 'ba7_9', label: 'ba7-9（A 排小群組 7-9）' });
-      opts.push({ value: 'ba10_12', label: 'ba10-12（A 排小群組 10-12）' });
-      for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}（A 排第 ${i} 路）` });
+      opts.push({ value: 'ma', label: 'ma' });
+      for (let n = 1; n <= 3; n++) opts.push({ value: `ma${n}`, label: `ma${n}` });
+      opts.push({ value: 'ba1_3', label: 'ba1-3' });
+      opts.push({ value: 'ba4_6', label: 'ba4-6' });
+      opts.push({ value: 'ba7_9', label: 'ba7-9' });
+      opts.push({ value: 'ba10_12', label: 'ba10-12' });
+      for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}` });
       // ─ B 排 ─
-      opts.push({ value: 'mb', label: 'mb（主 B 排）' });
-      for (let n = 1; n <= 3; n++) opts.push({ value: `mb${n}`, label: `mb${n}（主 B 排 第 ${n} 相）` });
-      opts.push({ value: 'bb1_3', label: 'bb1-3（B 排小群組 1-3）' });
-      opts.push({ value: 'bb4_6', label: 'bb4-6（B 排小群組 4-6）' });
-      opts.push({ value: 'bb7_9', label: 'bb7-9（B 排小群組 7-9）' });
-      opts.push({ value: 'bb10_12', label: 'bb10-12（B 排小群組 10-12）' });
-      for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}（B 排第 ${i} 路）` });
+      opts.push({ value: 'mb', label: 'mb' });
+      for (let n = 1; n <= 3; n++) opts.push({ value: `mb${n}`, label: `mb${n}` });
+      opts.push({ value: 'bb1_3', label: 'bb1-3' });
+      opts.push({ value: 'bb4_6', label: 'bb4-6' });
+      opts.push({ value: 'bb7_9', label: 'bb7-9' });
+      opts.push({ value: 'bb10_12', label: 'bb10-12' });
+      for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}` });
       return opts;
     },
     [],
   );
 
-  // CPM 系列下拉項（M-PM-198 §2.2 / §2.3）：main + L1/L2/L3 = 4 個
+  // CPM 系列下拉項（M-PM-198 §2.2 / §2.3 + M-PM-200 純代號）：main + L1/L2/L3 = 4 個
   const cpmCircuitOptions = useMemo(
     () => [
-      { value: 'main', label: '主迴路（平均/總和）' },
-      { value: 'l1', label: 'L1（A 相）' },
-      { value: 'l2', label: 'L2（B 相）' },
-      { value: 'l3', label: 'L3（C 相）' },
+      { value: 'main', label: 'main' },
+      { value: 'l1', label: 'L1' },
+      { value: 'l2', label: 'L2' },
+      { value: 'l3', label: 'L3' },
     ],
     [],
   );

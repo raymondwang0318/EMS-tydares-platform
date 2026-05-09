@@ -14,7 +14,8 @@ import {
   CameraOutlined,
 } from '@ant-design/icons';
 
-const { Sider, Content, Header } = Layout;
+// M-PM-201 §1.3: Header 移除（含文字+背景）；只保留 Sider + Content
+const { Sider, Content } = Layout;
 
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '總覽' },
@@ -44,8 +45,9 @@ export default function AdminLayout() {
         width={220}
         style={{ background: '#e8f5e9' }}
       >
-        <div style={{ height: 48, margin: 16, color: '#000000', fontSize: collapsed ? 14 : 16, fontWeight: 'bold', textAlign: 'center', lineHeight: '48px' }}>
-          {collapsed ? 'EMS' : 'EMS 工程維護'}
+        <div style={{ height: 48, margin: 16, color: '#000000', fontSize: collapsed ? 14 : 14, fontWeight: 'bold', textAlign: 'center', lineHeight: '48px' }}>
+          {/* M-PM-201 §1.2: 「EMS 工程維護」改「Tydares EMS — 工程維護」；collapsed 仍 EMS */}
+          {collapsed ? 'EMS' : 'Tydares EMS — 工程維護'}
         </div>
         <ConfigProvider theme={{ components: { Menu: { itemBg: '#e8f5e9', itemColor: '#000000', itemHoverBg: '#c8e6c9', itemSelectedBg: '#a5d6a7', itemSelectedColor: '#000000', subMenuItemBg: '#e8f5e9', popupBg: '#e8f5e9' } } }}>
           <Menu
@@ -57,9 +59,7 @@ export default function AdminLayout() {
         </ConfigProvider>
       </Sider>
       <Layout>
-        <Header style={{ padding: '0 24px', background: colorBgContainer, fontSize: 16, fontWeight: 'bold' }}>
-          Tydares EMS — 工程維護後台
-        </Header>
+        {/* M-PM-201 §1.3: Header bar 整塊移除（釋放垂直空間給內容區）*/}
         <Content style={{ margin: 16 }}>
           <div style={{ padding: 24, background: colorBgContainer, borderRadius: borderRadiusLG, minHeight: 360 }}>
             <Outlet />

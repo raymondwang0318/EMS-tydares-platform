@@ -101,7 +101,7 @@ export default function HistoryTable<T extends HistoryRow = HistoryRow>(
         title: '時間',
         dataIndex: 'ts',
         key: 'ts',
-        width: 170,
+        width: 130, // M-PM-201 §1.1: 縮減（既有 170 太寬；對齊其他 metric column）
         sorter: (a: T, b: T) => dayjs(a.ts).valueOf() - dayjs(b.ts).valueOf(),
         defaultSortOrder: 'descend' as const,
         render: (v: string) => dayjs(v).format(tsFormat),
