@@ -22,8 +22,13 @@ export interface EmsDevice {
   device_type?: string;
   /** @deprecated 同上；fallback 值 = display_name */
   device_name?: string | null;
-  /** V2-final backend 不回；保 optional 不破壞 ScanWizard 既有 column 顯示 */
+  /**
+   * V2-final backend 5/9 起回（P12 commit e1ccd2d）；M-PM-210/211 frontend transform 補帶
+   * ISO 8601 timestamp string（含 timezone offset，如 `2026-04-24T11:26:16.846243+08:00`）
+   */
   created_at?: string;
+  /** 同 created_at；P12 commit e1ccd2d 補；M-PM-210/211 frontend 接 */
+  updated_at?: string;
 }
 
 export type CommandStatus =
@@ -131,6 +136,11 @@ export function useEdgeDevices(edgeId: string | null) {
           // backend V2-final 不存 fine-grained type（cpm12d/cpm23/aem_drb），用 device_kind 概括
           device_type: (d.device_kind as string | undefined) ?? '',
           device_name: (d.display_name ?? null) as string | null,
+          // M-PM-210 / M-PM-211: 補 created_at + updated_at
+          // backend response 已含（P12 commit e1ccd2d）；transform 漏帶 → EdgesTable「建立時間」column 永遠 '—'
+          // 老王 5/9 20:40 PowerShell 採證 backend response 完整含 ISO timestamp
+          created_at: (d.created_at as string | undefined) ?? undefined,
+          updated_at: (d.updated_at as string | undefined) ?? undefined,
         }));
       } catch (err) {
         console.error('[useEdgeDevices] fetch failed', {
