@@ -14,15 +14,23 @@ import {
   CameraOutlined,
   LineChartOutlined,
 } from '@ant-design/icons';
+// M-PM-215 / T-AdminUI-002 方向 B：feature flag 控制設備型號 menu 顯示
+import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
 
 // M-PM-201 §1.3: Header 移除（含文字+背景）；只保留 Sider + Content
 const { Sider, Content } = Layout;
 
+// M-PM-215 / T-AdminUI-002 方向 B：menu items 依 feature flag 動態組裝
+// 業主 5/12 chat：「Web UI 設備型號分頁，似乎不需要存在？型號已經掛載到設備 ID 裡面了」
+// 預設 FF_DEVICE_MODELS_ENABLED=false → sidebar menu 隱藏；route + component code + schema 保留
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '總覽' },
   { key: '/edges', icon: <NodeIndexOutlined />, label: 'Edge 管理' },
   { key: '/devices', icon: <ClusterOutlined />, label: '設備管理' },
-  { key: '/device-models', icon: <ApartmentOutlined />, label: '設備型號' },
+  // M-PM-215：設備型號 menu 由 feature flag 控制
+  ...(FF_DEVICE_MODELS_ENABLED
+    ? [{ key: '/device-models', icon: <ApartmentOutlined />, label: '設備型號' }]
+    : []),
   { key: '/ecsu', icon: <ThunderboltOutlined />, label: '計費單位 (ECSU)' },
   { key: '/billing', icon: <DollarOutlined />, label: '電價規則' },
   { key: '/ir-devices', icon: <FireOutlined />, label: 'IR 標籤管理' },

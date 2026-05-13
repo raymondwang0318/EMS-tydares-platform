@@ -21,3 +21,17 @@ export const FF_REPORTS_LINECHART_ENABLED = envFlag(
   'VITE_FF_REPORTS_LINECHART_ENABLED',
   false,
 );
+
+/**
+ * 設備型號頁面（[[T-AdminUI-002]] / [[M-PM-215]] 業主決議方向 B）
+ *
+ * 業主 5/12 chat：「Web UI 設備型號分頁，似乎不需要存在？型號已經掛載到設備 ID 裡面了」
+ * 業主觀察成立（fnd_device_model 0 row；ScanWizard 跳過機型字典；device_model_id FK NULL）
+ *
+ * 預設 `false` → sidebar menu 隱藏；route 保留但無入口；component code 保留
+ * 啟用：`VITE_FF_DEVICE_MODELS_ENABLED=true npm run build`（業主未來啟用機型字典時）
+ */
+export const FF_DEVICE_MODELS_ENABLED = envFlag(
+  'VITE_FF_DEVICE_MODELS_ENABLED',
+  false,
+);
