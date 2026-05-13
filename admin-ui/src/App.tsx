@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import ModbusDevices from './pages/ModbusDevices';
 import ModbusModels from './pages/ModbusModels';
 import Ecsu from './pages/Ecsu';
+import EcsuDetail from './pages/EcsuDetail';   // M-PM-220: ECSU 詳情頁
 import BillingStandard from './pages/BillingStandard';
 import Reports from './pages/Reports';
 import Trends from './pages/Trends';   // M-PM-202: 趨勢圖獨立分項
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/devices" element={<ModbusDevices />} />
           <Route path="/device-models" element={<ModbusModels />} />
           <Route path="/ecsu" element={<Ecsu />} />
+          <Route path="/ecsu/:id" element={<EcsuDetail />} />
           <Route path="/billing" element={<BillingStandard />} />
           <Route path="/ir-devices" element={<IrDevices />} />
           <Route path="/thermal/all" element={<ThermalView />} />

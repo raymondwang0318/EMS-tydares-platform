@@ -10,11 +10,12 @@
  * 對接 backend M-P12-046 既有 8 endpoints（見 useEcsu.ts）
  */
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Button, Form, Input, InputNumber, Modal, Popconfirm, Space,
   Spin, Switch, Table, Tag, Typography, message,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, LinkOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
   useEcsuList,
@@ -57,6 +58,7 @@ function MonthlyKwhCell({ ecsuId }: { ecsuId: number }) {
 }
 
 export default function Ecsu() {
+  const navigate = useNavigate();
   const { data: rows, isLoading, refetch } = useEcsuList();
   const createMut = useCreateEcsu();
   const updateMut = useUpdateEcsu();
@@ -176,9 +178,18 @@ export default function Ecsu() {
     {
       title: '操作',
       key: 'action',
-      width: 130,
+      width: 200,
       render: (_: unknown, row) => (
         <Space size={4}>
+          {/* M-PM-220 §三：詳情頁入口 */}
+          <Button
+            size="small"
+            type="link"
+            icon={<LinkOutlined />}
+            onClick={() => navigate(`/ecsu/${row.ecsu_id}`)}
+          >
+            綁定
+          </Button>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
             編輯
           </Button>

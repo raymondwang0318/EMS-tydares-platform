@@ -177,6 +177,86 @@ export function useDeleteEcsu() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Circuit binding mutations (M-PM-220 §三 多對多綁定)
+// 對應 backend M-P12-046:
+//   POST   /admin/ecsu/{id}/circuits     → 新增綁定
+//   PATCH  /admin/ecsu/circuits/{assgn_id} → 改 sign / enabled / 備註
+//   DELETE /admin/ecsu/circuits/{assgn_id} → 移除綁定
+// ─────────────────────────────────────────────────────────────
+
+export interface CircuitBindingBody {
+  device_id: string;
+  circuit_code: string;
+  sign: -1 | 1;
+  enabled?: boolean;
+  remark_desc?: string | null;
+}
+
+export function useCreateEcsuCircuit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      ecsu_id,
+      ...body
+    }: CircuitBindingBody & { ecsu_id: number }) => {
+      const { data } = await api.post(`/admin/ecsu/${ecsu_id}/circuits`, body);
+      return data;
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ecsuKeys.circuits(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.realtime(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.monthly(vars.ecsu_id) });
+    },
+  });
+}
+
+export interface CircuitUpdateBody {
+  sign?: -1 | 1;
+  enabled?: boolean;
+  remark_desc?: string | null;
+}
+
+export function useUpdateEcsuCircuit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      assgn_id,
+      ecsu_id: _ecsu_id, // for cache invalidate
+      ...body
+    }: CircuitUpdateBody & { assgn_id: number; ecsu_id: number }) => {
+      const { data } = await api.patch(`/admin/ecsu/circuits/${assgn_id}`, body);
+      return data;
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ecsuKeys.circuits(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.realtime(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.monthly(vars.ecsu_id) });
+    },
+  });
+}
+
+export function useDeleteEcsuCircuit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      assgn_id,
+      ecsu_id: _ecsu_id,
+    }: {
+      assgn_id: number;
+      ecsu_id: number;
+    }) => {
+      const { data } = await api.delete(`/admin/ecsu/circuits/${assgn_id}`);
+      return data;
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ecsuKeys.circuits(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.realtime(vars.ecsu_id) });
+      qc.invalidateQueries({ queryKey: ecsuKeys.monthly(vars.ecsu_id) });
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
