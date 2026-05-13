@@ -632,6 +632,98 @@ async def create_ecsu(body: dict[str, Any] = Body(...), db: AsyncSession = Depen
     return {"status": "created", "ecsu_id": row.ecsu_id}
 
 
+# M-PM-217 Phase A：補 PUT + DELETE（業主 5/12 PUT 405 阻塞修；4/18 G1 預警兌現）
+
+_ECSU_ALLOWED_FIELDS = {
+    "ecsu_code", "ecsu_name", "parent_id", "display_seq", "enabled", "remark_desc"
+}
+
+
+@router.put("/ecsu/{ecsu_id}")
+@router.patch("/ecsu/{ecsu_id}")
+async def update_ecsu(
+    ecsu_id: int,
+    body: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """編輯 ECSU 主欄位（ecsu_code / ecsu_name / parent_id / display_seq / enabled / remark_desc）.
+
+    M-PM-217 Phase A 業主 P0 阻塞修（5/12 19:30 chat curl PUT 405）.
+    對齊 M-PM-151 / M-PM-166 device/edge PUT+PATCH 雙 decorator pattern。
+    """
+    row = await db.get(FndEcsu, ecsu_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    update_fields = {k: v for k, v in body.items() if k in _ECSU_ALLOWED_FIELDS}
+    if not update_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no valid fields to update; allowed: {sorted(_ECSU_ALLOWED_FIELDS)}",
+        )
+
+    for k, v in update_fields.items():
+        setattr(row, k, v)
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        actor=body.get("actor", "admin"),
+        message=f"ecsu updated: {sorted(update_fields.keys())}",
+        data_json={"ecsu_id": ecsu_id, **body},
+    ))
+    await db.commit()
+    await db.refresh(row)
+
+    return {
+        "status": "updated",
+        "ecsu_id": row.ecsu_id,
+        "ecsu_code": row.ecsu_code,
+        "ecsu_name": row.ecsu_name,
+        "parent_id": row.parent_id,
+        "display_seq": row.display_seq,
+        "enabled": row.enabled,
+        "remark_desc": row.remark_desc,
+        "updated_fields": sorted(update_fields.keys()),
+    }
+
+
+@router.delete("/ecsu/{ecsu_id}")
+async def delete_ecsu(
+    ecsu_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """刪除 ECSU（hard delete；fnd_ecsu schema 無 deleted_at；CASCADE 清 circuit_assgn）.
+
+    M-PM-217 Phase A 業主 P0 阻塞修。
+    fnd_ecsu_circuit_assgn FK ON DELETE CASCADE → 子表自動清。
+    """
+    row = await db.get(FndEcsu, ecsu_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    # 採證：是否有 child ECSU 指向本 row 為 parent
+    child_count = (await db.execute(
+        select(FndEcsu).where(FndEcsu.parent_id == ecsu_id)
+    )).scalars().all()
+    if child_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"ecsu_id {ecsu_id} has {len(child_count)} child ECSU; reassign or delete children first",
+        )
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        actor="admin",
+        message="ecsu deleted",
+        data_json={"ecsu_id": ecsu_id, "ecsu_code": row.ecsu_code, "ecsu_name": row.ecsu_name},
+    ))
+    await db.delete(row)
+    await db.commit()
+    return {"status": "deleted", "ecsu_id": ecsu_id}
+
+
 @router.get("/ecsu-assgn")
 async def list_ecsu_assgn(ecsu_id: int | None = None, db: AsyncSession = Depends(get_db)):
     stmt = select(FndEcsuCircuitAssgn)
