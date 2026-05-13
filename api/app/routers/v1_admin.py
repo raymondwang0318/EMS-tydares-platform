@@ -743,6 +743,272 @@ async def list_ecsu_assgn(ecsu_id: int | None = None, db: AsyncSession = Depends
     ]
 
 
+# ========== M-PM-217 Phase B：多對多綁定 CRUD（4 endpoints）==========
+
+_ASSGN_ALLOWED_FIELDS = {"sign", "enabled", "remark_desc"}
+
+
+@router.get("/ecsu/{ecsu_id}/circuits")
+async def list_ecsu_circuits(
+    ecsu_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """列某 ECSU 綁定的所有電路（多對多）.
+
+    DB 真實 schema: sign (-1/1) + enabled (替代 PM 信寫的 assignment_type ENUM)
+    """
+    ecsu = await db.get(FndEcsu, ecsu_id)
+    if ecsu is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    rows = (await db.execute(
+        select(FndEcsuCircuitAssgn).where(FndEcsuCircuitAssgn.ecsu_id == ecsu_id)
+    )).scalars().all()
+
+    return {
+        "ecsu_id": ecsu_id,
+        "ecsu_code": ecsu.ecsu_code,
+        "ecsu_name": ecsu.ecsu_name,
+        "circuits": [
+            {
+                "assgn_id": r.assgn_id,
+                "device_id": r.device_id,
+                "circuit_code": r.circuit_code,
+                "sign": r.sign,
+                "enabled": r.enabled,
+                "remark_desc": r.remark_desc,
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/ecsu/{ecsu_id}/circuits")
+async def create_ecsu_circuit(
+    ecsu_id: int,
+    body: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """新增 ECSU 電路綁定.
+
+    body required: device_id (str), circuit_code (str)
+    body optional: sign (int -1/1; default 1), enabled (bool; default True), remark_desc (str)
+    """
+    ecsu = await db.get(FndEcsu, ecsu_id)
+    if ecsu is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    device_id = body.get("device_id")
+    circuit_code = body.get("circuit_code")
+    if not device_id or not circuit_code:
+        raise HTTPException(status_code=422, detail="device_id and circuit_code required")
+
+    sign = body.get("sign", 1)
+    if sign not in (-1, 1):
+        raise HTTPException(status_code=422, detail="sign must be -1 or 1 (chk_assgn_sign)")
+
+    # device_id 必須存在於 ems_device
+    dev = await db.get(EmsDevice, device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail=f"device_id {device_id} not found")
+
+    assgn = FndEcsuCircuitAssgn(
+        ecsu_id=ecsu_id,
+        device_id=device_id,
+        circuit_code=circuit_code,
+        sign=sign,
+        enabled=body.get("enabled", True),
+        remark_desc=body.get("remark_desc"),
+    )
+    db.add(assgn)
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"conflict: UNIQUE(ecsu_id, device_id, circuit_code) — {type(e).__name__}",
+        )
+    await db.refresh(assgn)
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        device_id=device_id,
+        actor=body.get("actor", "admin"),
+        message=f"ecsu circuit bound: ecsu={ecsu_id} dev={device_id} circuit={circuit_code} sign={sign}",
+        data_json=body,
+    ))
+    await db.commit()
+
+    return {
+        "status": "created",
+        "assgn_id": assgn.assgn_id,
+        "ecsu_id": ecsu_id,
+        "device_id": device_id,
+        "circuit_code": circuit_code,
+        "sign": sign,
+        "enabled": assgn.enabled,
+    }
+
+
+@router.patch("/ecsu/circuits/{assgn_id}")
+async def update_ecsu_circuit(
+    assgn_id: int,
+    body: dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """更新 ECSU 電路綁定屬性 (sign / enabled / remark_desc).
+
+    不允許改：assgn_id (PK) / ecsu_id / device_id / circuit_code（要改改 ID 等於重建；應 DELETE + POST）
+    """
+    assgn = await db.get(FndEcsuCircuitAssgn, assgn_id)
+    if assgn is None:
+        raise HTTPException(status_code=404, detail=f"assgn_id {assgn_id} not found")
+
+    update_fields = {k: v for k, v in body.items() if k in _ASSGN_ALLOWED_FIELDS}
+    if not update_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no valid fields; allowed: {sorted(_ASSGN_ALLOWED_FIELDS)}",
+        )
+
+    if "sign" in update_fields and update_fields["sign"] not in (-1, 1):
+        raise HTTPException(status_code=422, detail="sign must be -1 or 1")
+
+    for k, v in update_fields.items():
+        setattr(assgn, k, v)
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        device_id=assgn.device_id,
+        actor=body.get("actor", "admin"),
+        message=f"ecsu circuit updated: assgn={assgn_id} fields={sorted(update_fields.keys())}",
+        data_json={"assgn_id": assgn_id, **body},
+    ))
+    await db.commit()
+
+    return {
+        "status": "updated",
+        "assgn_id": assgn_id,
+        "updated_fields": sorted(update_fields.keys()),
+    }
+
+
+@router.delete("/ecsu/circuits/{assgn_id}")
+async def delete_ecsu_circuit(
+    assgn_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """移除 ECSU 電路綁定."""
+    assgn = await db.get(FndEcsuCircuitAssgn, assgn_id)
+    if assgn is None:
+        raise HTTPException(status_code=404, detail=f"assgn_id {assgn_id} not found")
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        device_id=assgn.device_id,
+        actor="admin",
+        message=f"ecsu circuit unbound: assgn={assgn_id} ecsu={assgn.ecsu_id} dev={assgn.device_id}",
+        data_json={"assgn_id": assgn_id, "ecsu_id": assgn.ecsu_id, "device_id": assgn.device_id},
+    ))
+    await db.delete(assgn)
+    await db.commit()
+    return {"status": "deleted", "assgn_id": assgn_id}
+
+
+# ========== M-PM-217 Phase C：聚合查詢（2 endpoints）==========
+
+
+@router.get("/ecsu/{ecsu_id}/realtime")
+async def ecsu_realtime(
+    ecsu_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """即時用電聚合 — SUM(sign × latest power_total) over enabled bindings.
+
+    對齊 DB 真實 schema：sign (-1/1) 替代 PM 信寫的 assignment_type；
+    enabled 替代 valid_from/to；parameter_code='power_total' 替代 power_kw column.
+    """
+    ecsu = await db.get(FndEcsu, ecsu_id)
+    if ecsu is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    sql = """
+        SELECT COALESCE(SUM(a.sign * r.latest_power), 0) AS realtime_kw,
+               COUNT(DISTINCT a.assgn_id) AS active_bindings
+        FROM fnd_ecsu_circuit_assgn a
+        LEFT JOIN LATERAL (
+            SELECT value AS latest_power
+            FROM trx_reading
+            WHERE device_id = a.device_id
+              AND circuit_code = a.circuit_code
+              AND parameter_code = 'power_total'
+              AND ts > NOW() - INTERVAL '5 minutes'
+            ORDER BY ts DESC
+            LIMIT 1
+        ) r ON true
+        WHERE a.ecsu_id = :ecsu_id
+          AND a.enabled = TRUE
+    """
+    row = (await db.execute(text(sql), {"ecsu_id": ecsu_id})).fetchone()
+
+    return {
+        "ecsu_id": ecsu_id,
+        "ecsu_code": ecsu.ecsu_code,
+        "ecsu_name": ecsu.ecsu_name,
+        "realtime_kw": float(row[0]) if row and row[0] is not None else 0.0,
+        "active_bindings": int(row[1]) if row and row[1] is not None else 0,
+        "window": "5min",
+        "parameter_code": "power_total",
+    }
+
+
+@router.get("/ecsu/{ecsu_id}/monthly")
+async def ecsu_monthly(
+    ecsu_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """本月累積 kWh — 用 energy_kwh_imp 累積值差 (last - first) over month window.
+
+    對齊 DB 真實 schema：parameter_code='energy_kwh_imp' 累積能量 (kWh)
+    用 last - first 取月內累積差 (比 power × time 積分簡單且精準)
+    """
+    ecsu = await db.get(FndEcsu, ecsu_id)
+    if ecsu is None:
+        raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
+
+    sql = """
+        SELECT COALESCE(SUM(a.sign * COALESCE(r.kwh_delta, 0)), 0) AS monthly_kwh,
+               COUNT(DISTINCT a.assgn_id) AS active_bindings
+        FROM fnd_ecsu_circuit_assgn a
+        LEFT JOIN LATERAL (
+            SELECT MAX(value) - MIN(value) AS kwh_delta
+            FROM trx_reading
+            WHERE device_id = a.device_id
+              AND circuit_code = a.circuit_code
+              AND parameter_code = 'energy_kwh_imp'
+              AND ts >= date_trunc('month', NOW())
+        ) r ON true
+        WHERE a.ecsu_id = :ecsu_id
+          AND a.enabled = TRUE
+    """
+    row = (await db.execute(text(sql), {"ecsu_id": ecsu_id})).fetchone()
+
+    return {
+        "ecsu_id": ecsu_id,
+        "ecsu_code": ecsu.ecsu_code,
+        "ecsu_name": ecsu.ecsu_name,
+        "monthly_kwh": float(row[0]) if row and row[0] is not None else 0.0,
+        "active_bindings": int(row[1]) if row and row[1] is not None else 0,
+        "window": "month_to_date",
+        "parameter_code": "energy_kwh_imp",
+    }
+
+
 # ========== /admin/billing ==========
 
 @router.get("/billing")
