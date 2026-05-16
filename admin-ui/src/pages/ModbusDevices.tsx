@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Alert, Select, Space, Tag, Typography } from 'antd';
 import CrudTable from '../components/CrudTable';
 import { useEdges } from '../hooks/useEdges';
+import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
 
 const { Text } = Typography;
 
@@ -15,6 +16,11 @@ const { Text } = Typography;
  *   - 「所屬 Edge」改第 1 欄（業務直覺：先看歸屬再看細節）
  *   - 表格上方加 Edge filter 下拉（顯示全部 / 單一 Edge）
  *   - fleet 5 顆 Edge × ~10 設備管理需要 filter
+ *
+ * M-PM-221 / M-PM-222（業主 5/14 03:00 chat『甲 + ii』+ 03:05 直催）：
+ *   - 「型號 ID」column 由 FF_DEVICE_MODELS_ENABLED 控制（預設 false 隱藏）
+ *   - 對齊 M-PM-215 sidebar 設備型號移除（同 feature flag 統一）
+ *   - schema 不動（M-PM-027）；backend response 保留 model_id field
  */
 
 // M-PM-176 column 重排：所屬 Edge 改第 1 欄
@@ -23,7 +29,10 @@ const columns = [
   { title: '設備 ID', dataIndex: 'device_id', key: 'device_id' },
   { title: '類別', dataIndex: 'device_kind', key: 'device_kind', width: 120 },
   { title: '顯示名稱', dataIndex: 'display_name', key: 'display_name' },
-  { title: '型號 ID', dataIndex: 'model_id', key: 'model_id', width: 100, render: (v: number | null) => (v ?? '—') },
+  // M-PM-221: 型號 ID column 由 feature flag 控制（預設 false 不顯示；啟用機型字典時自動恢復）
+  ...(FF_DEVICE_MODELS_ENABLED
+    ? [{ title: '型號 ID', dataIndex: 'model_id', key: 'model_id', width: 100, render: (v: number | null) => (v ?? '—') }]
+    : []),
   { title: 'Config Ver', dataIndex: 'config_version', key: 'config_version', width: 100 },
   {
     title: '狀態',
