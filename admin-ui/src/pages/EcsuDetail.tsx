@@ -162,12 +162,19 @@ export default function EcsuDetail() {
   // ─ 新增綁定 dialog ─
   const [bindOpen, setBindOpen] = useState(false);
   const [bindForm] = Form.useForm<CircuitBindingBody>();
-  // M-PM-229: 追蹤 dialog 內當前選的 device_id → 推導 device_kind → fetch 迴路下拉
+  // M-PM-229: 追蹤 dialog 內當前選的 device_id → 推導 model kind → fetch 迴路下拉
+  //
+  // Model kind 推導：device_id prefix（對齊 useScanWizard.ts inferDefaults pattern）
+  // 因 ems_device.device_kind 是廣義（modbus_meter / thermal / relay / bacnet / other），
+  // 但 M-PM-228 backend /by-kind/{kind}/circuits 期待細分（cpm12d / cpm23 / aem_drb），
+  // 兩者 granularity 不同；細分 model 資訊存在 device_id 前綴（ScanWizard confirm 命名規則）。
+  // 例：`cpm23-TYDARES-E03-slave1` → 取 prefix `cpm23` 作為 model kind。
+  const KNOWN_MODEL_KINDS = ['cpm12d', 'cpm23', 'aem_drb'] as const;
   const [bindDeviceId, setBindDeviceId] = useState<string | undefined>();
-  const bindDeviceKind = useMemo(
-    () => edgeDevices.find((d) => d.device_id === bindDeviceId)?.device_kind,
-    [edgeDevices, bindDeviceId],
-  );
+  const bindDeviceKind = useMemo(() => {
+    if (!bindDeviceId) return undefined;
+    return KNOWN_MODEL_KINDS.find((t) => bindDeviceId.startsWith(`${t}-`));
+  }, [bindDeviceId]);
   const { data: bindCircuitsData, isFetching: bindCircuitsLoading } =
     useDeviceCircuits(bindDeviceKind);
   const openBindCreate = () => {
@@ -522,10 +529,10 @@ export default function EcsuDetail() {
               !bindDeviceId
                 ? '請先選設備'
                 : bindCircuitsLoading
-                  ? '載入該設備類型的迴路清單…'
+                  ? '載入該機型的迴路清單…'
                   : bindDeviceKind
-                    ? `依 ${bindDeviceKind} 設備類型載入；共 ${bindCircuitsData?.count ?? 0} 條`
-                    : '該設備無迴路代號（device_kind 缺）'
+                    ? `依 ${bindDeviceKind} 機型載入；共 ${bindCircuitsData?.count ?? 0} 條`
+                    : '該設備 device_id 前綴非已知機型（cpm12d / cpm23 / aem_drb）'
             }
           >
             <Select
