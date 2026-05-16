@@ -1066,6 +1066,51 @@ async def list_model_circuits(model_id: int, db: AsyncSession = Depends(get_db))
     ]
 
 
+# M-PM-228: schema-driven device_kind → circuit list（hardcode constants）
+# URL 自決加 /by-kind/ 區段避免與既有 /{model_id} (int) 同 path 衝突
+# frontend M-PM-229 需對齊此 URL
+
+from app.constants.device_circuits import DEVICE_MODEL_CIRCUITS, get_circuits
+
+
+@router.get("/device-models/circuits")
+async def get_all_device_circuits():
+    """取全部 device_kind → circuit list（級聯下拉 fallback）.
+
+    M-PM-228 schema-driven hardcode；frontend ECSU 綁定 dialog 用於初始 dropdown。
+    """
+    return {
+        "device_kinds": list(DEVICE_MODEL_CIRCUITS.keys()),
+        "circuits_by_kind": DEVICE_MODEL_CIRCUITS,
+    }
+
+
+@router.get("/device-models/by-kind/{device_kind}/circuits")
+async def get_circuits_by_device_kind(device_kind: str):
+    """取指定 device_kind 的 circuit list.
+
+    M-PM-228 業主明示「乙. Long-term schema-driven」；hardcode 在 backend constants
+    （01_Edge 設備地圖採證源）；不擴 schema。
+
+    支援 device_kind: aem_drb / cpm23 / cpm12d（PM 信 §2.3 三件採證源）
+
+    Note: URL 加 /by-kind/ 區段避免與既有 GET /device-models/{model_id}/circuits (int) 衝突；
+    frontend M-PM-229 需依此 URL 對齊。
+    """
+    circuits = get_circuits(device_kind)
+    if circuits is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"device_kind {device_kind!r} not supported; "
+                   f"available: {sorted(DEVICE_MODEL_CIRCUITS.keys())}",
+        )
+    return {
+        "device_kind": device_kind,
+        "circuits": circuits,
+        "count": len(circuits),
+    }
+
+
 # ========== /admin/electric-parameters ==========
 
 @router.get("/electric-parameters")
