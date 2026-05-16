@@ -70,6 +70,26 @@ export interface EcsuFormBody {
   remark_desc?: string | null;
 }
 
+/**
+ * Device-kind circuit option（M-PM-228 backend hardcode constants）
+ * 對應 GET /v1/admin/device-models/by-kind/{device_kind}/circuits
+ *
+ * - aem_drb: 26 circuits（2 main: ma/mb + 24 branch: ba1~ba24）
+ * - cpm12d:  1 circuit  (main: ma)
+ * - cpm23:   1 circuit  (main: ma)
+ */
+export interface DeviceCircuitOption {
+  code: string;
+  name: string;
+  category: 'main' | 'branch';
+}
+
+export interface DeviceCircuitsResp {
+  device_kind: string;
+  circuits: DeviceCircuitOption[];
+  count: number;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Query keys
 // ─────────────────────────────────────────────────────────────
@@ -81,6 +101,12 @@ const ecsuKeys = {
   circuits: (id: number) => [...ecsuKeys.all, 'circuits', id] as const,
   realtime: (id: number) => [...ecsuKeys.all, 'realtime', id] as const,
   monthly: (id: number) => [...ecsuKeys.all, 'monthly', id] as const,
+};
+
+// M-PM-228/229 device_kind → circuits lookup（schema-driven dropdown）
+const deviceCircuitsKeys = {
+  all: ['device-circuits'] as const,
+  byKind: (kind: string) => [...deviceCircuitsKeys.all, 'by-kind', kind] as const,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -123,6 +149,30 @@ export function useEcsuRealtime(ecsuId: number | null | undefined) {
     enabled: ecsuId != null,
     staleTime: 5_000, // 接近即時
     refetchInterval: 30_000, // 30s 自動 refresh
+  });
+}
+
+/**
+ * Per device_kind 的 circuit list（M-PM-228/229 schema-driven dropdown）
+ * Backend：GET /v1/admin/device-models/by-kind/{device_kind}/circuits
+ *
+ * 設計：
+ * - device_kind 為 null → query disabled（用戶尚未選 device）
+ * - staleTime: Infinity → backend hardcode constants 永不變動；cache 永久有效
+ * - 404 → backend 回 detail 含支援清單（M-PM-228 §3.2 已內建）；frontend catch 後傳空 array
+ */
+export function useDeviceCircuits(deviceKind: string | null | undefined) {
+  return useQuery({
+    queryKey: deviceCircuitsKeys.byKind(deviceKind ?? '__none__'),
+    queryFn: async (): Promise<DeviceCircuitsResp> => {
+      const { data } = await api.get<DeviceCircuitsResp>(
+        `/admin/device-models/by-kind/${deviceKind}/circuits`,
+      );
+      return data;
+    },
+    enabled: !!deviceKind,
+    staleTime: Infinity, // backend hardcode 不變；永久 cache
+    retry: 1,
   });
 }
 

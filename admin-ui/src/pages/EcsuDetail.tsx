@@ -8,7 +8,10 @@
  * - 即時統計三 Card：即時 kW（30s refetch）/ 本月 kWh / 綁定數
  * - 編輯 ECSU 基本資料 Modal（reuse §二 form 6 欄）
  * - 下半部多對多綁定列表 + [+ 新增綁定] dialog 級聯 Edge→Device→Circuit
- *   - circuit_code 採自由輸入（M-PM-220 §三 自決 a；最簡業主可立即動）
+ *   - circuit_code 採 schema-driven dropdown（M-PM-228/229；by-kind hardcode 26 / 1 / 1 circuits）
+ *     → 對接 GET /v1/admin/device-models/by-kind/{device_kind}/circuits
+ *     → 設備選後依 device_kind 載入；OptGroup 分組 main / branch
+ *     → 設備換 → circuit_code reset；schema-driven 取代 M-P11-070 §三 自決 a 自由輸入
  *   - sign 預設 +1（消耗）；可切 -1（反向潮流 / 太陽能反送）
  *   - enabled 預設 true
  * - 編輯綁定 dialog（只 sign / enabled / 備註；device_id + circuit_code 不可改）
@@ -38,6 +41,7 @@ import {
   useCreateEcsuCircuit,
   useUpdateEcsuCircuit,
   useDeleteEcsuCircuit,
+  useDeviceCircuits,
   type EcsuFormBody,
   type CircuitBindingBody,
 } from '../hooks/useEcsu';
@@ -158,6 +162,14 @@ export default function EcsuDetail() {
   // ─ 新增綁定 dialog ─
   const [bindOpen, setBindOpen] = useState(false);
   const [bindForm] = Form.useForm<CircuitBindingBody>();
+  // M-PM-229: 追蹤 dialog 內當前選的 device_id → 推導 device_kind → fetch 迴路下拉
+  const [bindDeviceId, setBindDeviceId] = useState<string | undefined>();
+  const bindDeviceKind = useMemo(
+    () => edgeDevices.find((d) => d.device_id === bindDeviceId)?.device_kind,
+    [edgeDevices, bindDeviceId],
+  );
+  const { data: bindCircuitsData, isFetching: bindCircuitsLoading } =
+    useDeviceCircuits(bindDeviceKind);
   const openBindCreate = () => {
     bindForm.resetFields();
     bindForm.setFieldsValue({
@@ -168,6 +180,7 @@ export default function EcsuDetail() {
       remark_desc: '',
     });
     setBindEdgeId(undefined);
+    setBindDeviceId(undefined);
     setBindOpen(true);
   };
   const submitBindCreate = async () => {
@@ -468,7 +481,9 @@ export default function EcsuDetail() {
               value={bindEdgeId}
               onChange={(v) => {
                 setBindEdgeId(v);
+                setBindDeviceId(undefined);
                 bindForm.setFieldValue('device_id', '');
+                bindForm.setFieldValue('circuit_code', '');
               }}
               placeholder="選擇 Edge"
               options={(edgesData ?? []).map((e) => ({
@@ -492,15 +507,66 @@ export default function EcsuDetail() {
                 label: `${d.device_id}${d.display_name ? ' · ' + d.display_name : ''}`,
               }))}
               showSearch
+              onChange={(v: string) => {
+                setBindDeviceId(v);
+                // M-PM-229: 設備換 → reset circuit_code（避免舊代號殘留）
+                bindForm.setFieldValue('circuit_code', '');
+              }}
             />
           </Form.Item>
           <Form.Item
             name="circuit_code"
             label="迴路代號"
-            rules={[{ required: true, message: '迴路代號必填' }]}
-            extra="例：main / ba1 / bb12 / l1（依設備種類；自由輸入）"
+            rules={[{ required: true, message: '請選擇迴路代號' }]}
+            extra={
+              !bindDeviceId
+                ? '請先選設備'
+                : bindCircuitsLoading
+                  ? '載入該設備類型的迴路清單…'
+                  : bindDeviceKind
+                    ? `依 ${bindDeviceKind} 設備類型載入；共 ${bindCircuitsData?.count ?? 0} 條`
+                    : '該設備無迴路代號（device_kind 缺）'
+            }
           >
-            <Input placeholder="例如：main 或 ba1" />
+            <Select
+              disabled={!bindDeviceId || bindCircuitsLoading}
+              loading={bindCircuitsLoading}
+              placeholder={
+                !bindDeviceId
+                  ? '請先選設備'
+                  : bindCircuitsLoading
+                    ? '載入中…'
+                    : '選擇迴路代號'
+              }
+              showSearch
+              optionFilterProp="label"
+              options={(() => {
+                const circuits = bindCircuitsData?.circuits ?? [];
+                if (circuits.length === 0) return [];
+                const main = circuits.filter((c) => c.category === 'main');
+                const branch = circuits.filter((c) => c.category === 'branch');
+                const groups: { label: string; options: { value: string; label: string }[] }[] = [];
+                if (main.length > 0) {
+                  groups.push({
+                    label: `主迴路 Main (${main.length})`,
+                    options: main.map((c) => ({
+                      value: c.code,
+                      label: `${c.code} · ${c.name}`,
+                    })),
+                  });
+                }
+                if (branch.length > 0) {
+                  groups.push({
+                    label: `分支迴路 Branch (${branch.length})`,
+                    options: branch.map((c) => ({
+                      value: c.code,
+                      label: `${c.code} · ${c.name}`,
+                    })),
+                  });
+                }
+                return groups;
+              })()}
+            />
           </Form.Item>
           <Form.Item
             name="sign"
