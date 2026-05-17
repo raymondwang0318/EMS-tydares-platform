@@ -333,9 +333,11 @@ export function buildEcsuTree(rows: EcsuRow[]): Array<EcsuRow & { children?: Ecs
       }
     }
   });
-  // sort by display_seq
-  const sortFn = (a: EcsuRow, b: EcsuRow) =>
-    (a.display_seq ?? 999) - (b.display_seq ?? 999) || a.ecsu_id - b.ecsu_id;
+  // M-PM-231: sort by ecsu_id ASC（老王 5/17 chat 明示「ID 由小至大排列，GO」）
+  // 原邏輯 (display_seq ?? 999) 優先導致 KW-08 (display_seq < 999) 排在 KW-01~07 (display_seq null) 之前。
+  // 業主明示純 ID 排序；display_seq 欄位保留於 schema 但暫不影響 sort（未來如業主要改回可加 toggle）。
+  // 樹狀子節點同遞迴 sort。
+  const sortFn = (a: EcsuRow, b: EcsuRow) => a.ecsu_id - b.ecsu_id;
   roots.sort(sortFn);
   byId.forEach((n) => n.children?.sort(sortFn));
   return roots;
