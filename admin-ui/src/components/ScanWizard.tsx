@@ -369,9 +369,24 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
         `${label}，配置指令已下發 (${res.command_id.slice(0, 8)}...)`,
       );
       // T-AdminUI-005: confirm 成功 → 標記跳過 rollback
-      // （已成 ems_device 真正 row；prev placeholder 已被 confirm flow 替換 / 不再需 rollback）
+      //
+      // M-P11-E06 修：原 comment「prev placeholder 已被 confirm flow 替換」假設不對 —
+      // backend confirm cleanup (v1_admin.py L301) 寫死舊命名 `_scan-{edge_id}`；
+      // ScanWizard 改用 `_placeholder_{hex}` 後 backend cleanup 永遠 0 row → placeholder 殘留
+      // (5/17 老王 E10 鐵證；created_at 與真實 device 相差 19s)。
+      // 修法雙保險：
+      //   (1) backend cleanup 改 LIKE '_placeholder_%' (本卷 v1_admin.py L301 同步修)
+      //   (2) frontend explicit DELETE placeholder (本卷；防 old image / cleanup 失敗)
+      // confirmedRef.current = true 標記跳過 closeModal rollback dialog（confirm 流程不需問業主）
+      const placeholderToCleanup = placeholderIdRef.current;
       confirmedRef.current = true;
       stopPolling();
+      // 顯式清 placeholder（best-effort；backend 應已清；本 frontend 為雙保險）
+      if (placeholderToCleanup) {
+        deleteDevice.mutateAsync(placeholderToCleanup).catch(() => {
+          // 已被 backend 清 → 404；忽略
+        });
+      }
       onClose();
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } }; message?: string };

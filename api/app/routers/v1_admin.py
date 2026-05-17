@@ -299,16 +299,35 @@ async def confirm_devices(
     await db.commit()
 
     # 2. Cleanup bootstrap placeholder（保留歷史 scan commands FK）
-    placeholder_id = f"_scan-{edge_id}"
+    #
+    # M-P11-E06 修：原碼寫死 `_scan-{edge_id}` (舊命名)；ScanWizard 現用 `_placeholder_{hex}` (新命名)
+    # → cleanup 永遠 0 row → 路徑 3 confirm 後 placeholder 殘留 (5/17 老王 E10 鐵證)
+    # 修法：LIKE `_placeholder_%` 比對任何 hex 後綴；FK update 取該 edge 所有殘留 placeholder
     first_real_id = body.devices[0].device_id
-    if first_real_id != placeholder_id:
-        await db.execute(
-            text("UPDATE ems_commands SET device_id = :new_id WHERE device_id = :placeholder"),
-            {"new_id": first_real_id, "placeholder": placeholder_id},
-        )
+    # FK保: 將 placeholder 上的 scan command 改指到第一個真實 device_id（避免孤兒 FK）
     await db.execute(
-        text("DELETE FROM ems_device WHERE device_id = :placeholder AND edge_id = :edge_id"),
-        {"placeholder": placeholder_id, "edge_id": edge_id},
+        text("""
+            UPDATE ems_commands
+            SET device_id = :new_id
+            WHERE device_id LIKE '_placeholder_%'
+              AND device_id IN (
+                SELECT device_id FROM ems_device WHERE edge_id = :edge_id
+              )
+        """),
+        {"new_id": first_real_id, "edge_id": edge_id},
+    )
+    # 軟刪該 edge 所有 placeholder（含本次 ScanWizard bootstrap + 任何歷史殘留）
+    # 使用 soft_delete_device pattern：set deleted_at 而非 DELETE row (對齊 schema 既有設計)
+    from datetime import datetime, timezone as tz
+    await db.execute(
+        text("""
+            UPDATE ems_device
+            SET deleted_at = :now
+            WHERE device_id LIKE '_placeholder_%'
+              AND edge_id = :edge_id
+              AND deleted_at IS NULL
+        """),
+        {"now": datetime.now(tz.utc), "edge_id": edge_id},
     )
     await db.commit()
 
