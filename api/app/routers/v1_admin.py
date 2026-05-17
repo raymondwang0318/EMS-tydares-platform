@@ -937,6 +937,10 @@ async def ecsu_realtime(
     if ecsu is None:
         raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
 
+    # M-P11-E03 / M-P11-E05: circuit_code 大小寫不對齊修法（業主 5/17 明示甲；P11E 跨 scope 動）
+    # ingest (worker.py L67) default 'Ma' 大寫 + ECSU binding (device_circuits.py) 小寫 'ma' / 'ba1' / ...
+    # → 嚴格相等 JOIN 0 row → realtime_kw 永遠 0；採證鐵證 reports/energy 該 device power_total 50 points 過去 4hr
+    # 修法：LOWER() 雙邊比對；trx_reading hypertable cost 小可忽略
     sql = """
         SELECT COALESCE(SUM(a.sign * r.latest_power), 0) AS realtime_kw,
                COUNT(DISTINCT a.assgn_id) AS active_bindings
@@ -945,7 +949,7 @@ async def ecsu_realtime(
             SELECT value AS latest_power
             FROM trx_reading
             WHERE device_id = a.device_id
-              AND circuit_code = a.circuit_code
+              AND LOWER(circuit_code) = LOWER(a.circuit_code)
               AND parameter_code = 'power_total'
               AND ts > NOW() - INTERVAL '5 minutes'
             ORDER BY ts DESC
@@ -981,6 +985,7 @@ async def ecsu_monthly(
     if ecsu is None:
         raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
 
+    # M-P11-E03 / M-P11-E05: 同 realtime — circuit_code 大小寫對齊修
     sql = """
         SELECT COALESCE(SUM(a.sign * COALESCE(r.kwh_delta, 0)), 0) AS monthly_kwh,
                COUNT(DISTINCT a.assgn_id) AS active_bindings
@@ -989,7 +994,7 @@ async def ecsu_monthly(
             SELECT MAX(value) - MIN(value) AS kwh_delta
             FROM trx_reading
             WHERE device_id = a.device_id
-              AND circuit_code = a.circuit_code
+              AND LOWER(circuit_code) = LOWER(a.circuit_code)
               AND parameter_code = 'energy_kwh_imp'
               AND ts >= date_trunc('month', NOW())
         ) r ON true
