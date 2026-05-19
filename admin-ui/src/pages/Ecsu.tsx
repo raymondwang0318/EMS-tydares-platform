@@ -89,7 +89,9 @@ export default function Ecsu() {
       _realtime_kw: number | null;
       _monthly_kwh: number | null;
     }
-    const enriched: ExportRow[] = rows.map((r) => {
+    // 對齊 UI 順序：M-PM-231 純 ecsu_id ASC sort（buildEcsuTree 兌現；本卷 Excel 同步）
+    const sortedRows = [...rows].sort((a, b) => a.ecsu_id - b.ecsu_id);
+    const enriched: ExportRow[] = sortedRows.map((r) => {
       const c = queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', r.ecsu_id]);
       const rt = queryClient.getQueryData<EcsuRealtimeResp>(['ecsu', 'realtime', r.ecsu_id]);
       const mo = queryClient.getQueryData<EcsuMonthlyResp>(['ecsu', 'monthly', r.ecsu_id]);
