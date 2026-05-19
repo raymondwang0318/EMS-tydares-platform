@@ -11,11 +11,15 @@
  */
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Button, Form, Input, InputNumber, Modal, Popconfirm, Space,
   Spin, Switch, Table, Tag, Typography, message,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, LinkOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, LinkOutlined,
+  FileExcelOutlined,
+} from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
   useEcsuList,
@@ -27,8 +31,12 @@ import {
   useDeleteEcsu,
   buildEcsuTree,
   type EcsuRow,
+  type EcsuCircuitsResp,
+  type EcsuRealtimeResp,
+  type EcsuMonthlyResp,
   type EcsuFormBody,
 } from '../hooks/useEcsu';
+import { useReportExport, type ExportColumn } from '../hooks/useReportExport';
 
 const { Title, Text } = Typography;
 
@@ -59,10 +67,69 @@ function MonthlyKwhCell({ ecsuId }: { ecsuId: number }) {
 
 export default function Ecsu() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { exportToExcel, isExporting } = useReportExport();
   const { data: rows, isLoading, refetch } = useEcsuList();
   const createMut = useCreateEcsu();
   const updateMut = useUpdateEcsu();
   const deleteMut = useDeleteEcsu();
+
+  // M-PM-238 §B: Excel 匯出甲方案
+  // - 單 sheet 10 column；命名 Tydares_ECSU_列表_YYYYMMDD_HH.xlsx
+  // - 重用 useReportExport hook (M-PM-173 既建 SheetJS pattern)
+  // - 即時 kW / 本月 kWh / 綁定數 從 react-query cache 取（per-row cells 已 mount fetch）；無額外 API call
+  // - tree flatten：用 useEcsuList 的 flat rows（非 treeData）；含全部父子節點同一層
+  const handleExportExcel = () => {
+    if (!rows || rows.length === 0) {
+      message.warning('無資料可匯出');
+      return;
+    }
+    interface ExportRow extends EcsuRow {
+      _circuits_count: number | null;
+      _realtime_kw: number | null;
+      _monthly_kwh: number | null;
+    }
+    const enriched: ExportRow[] = rows.map((r) => {
+      const c = queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', r.ecsu_id]);
+      const rt = queryClient.getQueryData<EcsuRealtimeResp>(['ecsu', 'realtime', r.ecsu_id]);
+      const mo = queryClient.getQueryData<EcsuMonthlyResp>(['ecsu', 'monthly', r.ecsu_id]);
+      return {
+        ...r,
+        _circuits_count: c?.count ?? null,
+        _realtime_kw: rt?.realtime_kw ?? null,
+        _monthly_kwh: mo?.monthly_kwh ?? null,
+      };
+    });
+    const columns: ExportColumn<ExportRow>[] = [
+      { key: 'ecsu_id', header: 'ID' },
+      { key: 'ecsu_code', header: '代碼' },
+      { key: 'ecsu_name', header: '名稱' },
+      { key: 'parent_id', header: '上層 ID', render: (r) => r.parent_id ?? '—' },
+      { key: '_circuits_count', header: '綁定迴路數', render: (r) => r._circuits_count ?? '—' },
+      {
+        key: '_realtime_kw',
+        header: '即時 (kW)',
+        render: (r) => (r._realtime_kw == null ? '—' : r._realtime_kw.toFixed(2)),
+      },
+      {
+        key: '_monthly_kwh',
+        header: '本月 (kWh)',
+        render: (r) => (r._monthly_kwh == null ? '—' : r._monthly_kwh.toFixed(1)),
+      },
+      { key: 'display_seq', header: '顯示順序', render: (r) => r.display_seq ?? '—' },
+      { key: 'enabled', header: '狀態', render: (r) => (r.enabled ? '啟用' : '停用') },
+      { key: 'remark_desc', header: '備註', render: (r) => r.remark_desc ?? '' },
+    ];
+    // 業主 5/19 明示命名：Tydares_ECSU_列表_YYYYMMDD_HH.xlsx
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const filename = `Tydares_ECSU_列表_${yyyy}${mm}${dd}_${hh}.xlsx`;
+    exportToExcel({ rows: enriched, columns, filename, sheetName: 'ECSU 列表' });
+    message.success(`已匯出 ${filename}（${enriched.length} 列）`);
+  };
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<EcsuRow | null>(null);
@@ -217,6 +284,15 @@ export default function Ecsu() {
         </Button>
         <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
           重新整理
+        </Button>
+        {/* M-PM-238 §B：Excel 匯出甲方案；單 sheet 10 column；命名 Tydares_ECSU_列表_YYYYMMDD_HH.xlsx */}
+        <Button
+          icon={<FileExcelOutlined />}
+          onClick={handleExportExcel}
+          loading={isExporting}
+          disabled={!rows || rows.length === 0}
+        >
+          匯出 Excel
         </Button>
         <Text type="secondary" style={{ fontSize: 12 }}>
           M-PM-219 §二補強：含綁定迴路數 / 即時 kW（30s 自動更新）/ 本月累積 kWh
