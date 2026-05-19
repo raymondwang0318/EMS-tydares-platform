@@ -31,8 +31,51 @@ from app.models import (
 )
 from app.services import command_service, config_service
 from app.services.wakeup_service import send_wakeup
+from app.constants.device_circuits import (
+    DEVICE_MODEL_CIRCUITS,
+    get_circuits,
+    map_circuit_to_energy_param,
+    map_circuit_to_power_param,
+)
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(verify_admin_token)])
+
+
+# ============================================================================
+# M-PM-237 Phase D: ECSU 聚合 5 sec TTL in-mem cache（單 worker；多 worker 轉 Redis）
+# ============================================================================
+
+import time as _time
+
+_ECSU_CACHE_TTL_SEC = 5.0
+_ecsu_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+
+
+def _cache_get(kind: str, ecsu_id: int) -> dict[str, Any] | None:
+    key = (kind, ecsu_id)
+    entry = _ecsu_cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if _time.time() - ts > _ECSU_CACHE_TTL_SEC:
+        _ecsu_cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_put(kind: str, ecsu_id: int, value: dict[str, Any]) -> None:
+    _ecsu_cache[(kind, ecsu_id)] = (_time.time(), value)
+
+
+def _cache_invalidate(ecsu_id: int) -> None:
+    """業務變更時清 cache（POST/PATCH/DELETE /circuits）."""
+    _ecsu_cache.pop(("realtime", ecsu_id), None)
+    _ecsu_cache.pop(("monthly", ecsu_id), None)
+
+
+def _cache_invalidate_all() -> None:
+    """全清（test/debug 用）."""
+    _ecsu_cache.clear()
 
 
 # ========== /admin/edges ==========
@@ -861,6 +904,8 @@ async def create_ecsu_circuit(
     ))
     await db.commit()
 
+    _cache_invalidate(ecsu_id)  # M-PM-237 Phase D: 業務變更清 cache
+
     return {
         "status": "created",
         "assgn_id": assgn.assgn_id,
@@ -909,9 +954,12 @@ async def update_ecsu_circuit(
     ))
     await db.commit()
 
+    _cache_invalidate(assgn.ecsu_id)  # M-PM-237 Phase D: 業務變更清 cache
+
     return {
         "status": "updated",
         "assgn_id": assgn_id,
+        "ecsu_id": assgn.ecsu_id,
         "updated_fields": sorted(update_fields.keys()),
     }
 
@@ -926,6 +974,7 @@ async def delete_ecsu_circuit(
     if assgn is None:
         raise HTTPException(status_code=404, detail=f"assgn_id {assgn_id} not found")
 
+    invalidated_ecsu_id = assgn.ecsu_id  # 保留在 DELETE 前
     db.add(EmsEvent(
         event_kind="operation",
         severity="info",
@@ -936,6 +985,7 @@ async def delete_ecsu_circuit(
     ))
     await db.delete(assgn)
     await db.commit()
+    _cache_invalidate(invalidated_ecsu_id)  # M-PM-237 Phase D: 業務變更清 cache
     return {"status": "deleted", "assgn_id": assgn_id}
 
 
@@ -947,47 +997,75 @@ async def ecsu_realtime(
     ecsu_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """即時用電聚合 — SUM(sign × latest power_total) over enabled bindings.
+    """即時用電聚合 — SUM(sign × latest power per binding) over enabled bindings.
 
-    對齊 DB 真實 schema：sign (-1/1) 替代 PM 信寫的 assignment_type；
-    enabled 替代 valid_from/to；parameter_code='power_total' 替代 power_kw column.
+    M-PM-237 Phase B+C 重寫：mapping layer 對齊 driver 真實 parameter_code。
+
+    Root cause C 修法：trx_reading.circuit_code 統一 'Ma'（driver flat 寫），
+    放棄 JOIN circuit_code；改用 map_circuit_to_power_param() 算每個 binding 對應的
+    parameter_code（aem_drb: ba1 → ba1_p / ba1-3 → ba1_3_p_sum；
+    cpm23/cpm12d: → power_total）。
+
+    Phase D：5 sec TTL in-mem cache；業務變更時 invalidate。
     """
+    cached = _cache_get("realtime", ecsu_id)
+    if cached is not None:
+        return cached
+
     ecsu = await db.get(FndEcsu, ecsu_id)
     if ecsu is None:
         raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
 
-    # M-P11-E03 / M-P11-E05: circuit_code 大小寫不對齊修法（業主 5/17 明示甲；P11E 跨 scope 動）
-    # ingest (worker.py L67) default 'Ma' 大寫 + ECSU binding (device_circuits.py) 小寫 'ma' / 'ba1' / ...
-    # → 嚴格相等 JOIN 0 row → realtime_kw 永遠 0；採證鐵證 reports/energy 該 device power_total 50 points 過去 4hr
-    # 修法：LOWER() 雙邊比對；trx_reading hypertable cost 小可忽略
-    sql = """
-        SELECT COALESCE(SUM(a.sign * r.latest_power), 0) AS realtime_kw,
-               COUNT(DISTINCT a.assgn_id) AS active_bindings
-        FROM fnd_ecsu_circuit_assgn a
-        LEFT JOIN LATERAL (
-            SELECT value AS latest_power
-            FROM trx_reading
-            WHERE device_id = a.device_id
-              AND LOWER(circuit_code) = LOWER(a.circuit_code)
-              AND parameter_code = 'power_total'
-              AND ts > NOW() - INTERVAL '5 minutes'
-            ORDER BY ts DESC
-            LIMIT 1
-        ) r ON true
-        WHERE a.ecsu_id = :ecsu_id
-          AND a.enabled = TRUE
-    """
-    row = (await db.execute(text(sql), {"ecsu_id": ecsu_id})).fetchone()
+    bindings = (await db.execute(
+        select(FndEcsuCircuitAssgn).where(
+            FndEcsuCircuitAssgn.ecsu_id == ecsu_id,
+            FndEcsuCircuitAssgn.enabled == True,
+        )
+    )).scalars().all()
 
-    return {
+    total_kw = 0.0
+    active = 0
+    binding_details: list[dict[str, Any]] = []
+
+    for b in bindings:
+        param = map_circuit_to_power_param(b.circuit_code, b.device_id)
+        latest = (await db.execute(text("""
+            SELECT value FROM trx_reading
+            WHERE device_id = :device_id
+              AND parameter_code = :param_code
+              AND ts > NOW() - INTERVAL '5 minutes'
+            ORDER BY ts DESC LIMIT 1
+        """), {"device_id": b.device_id, "param_code": param})).fetchone()
+
+        value_w = float(latest[0]) if latest is not None and latest[0] is not None else None
+        value_kw = (value_w / 1000.0) if value_w is not None else None
+
+        if value_kw is not None:
+            total_kw += b.sign * value_kw
+            active += 1
+
+        binding_details.append({
+            "assgn_id": b.assgn_id,
+            "device_id": b.device_id,
+            "circuit_code": b.circuit_code,
+            "parameter_code": param,
+            "sign": b.sign,
+            "value_kw": value_kw,
+        })
+
+    result = {
         "ecsu_id": ecsu_id,
         "ecsu_code": ecsu.ecsu_code,
         "ecsu_name": ecsu.ecsu_name,
-        "realtime_kw": float(row[0]) if row and row[0] is not None else 0.0,
-        "active_bindings": int(row[1]) if row and row[1] is not None else 0,
+        "realtime_kw": total_kw,
+        "active_bindings": active,
+        "total_bindings": len(bindings),
         "window": "5min",
-        "parameter_code": "power_total",
+        "bindings": binding_details,
+        "cached": False,
     }
+    _cache_put("realtime", ecsu_id, {**result, "cached": True})
+    return result
 
 
 @router.get("/ecsu/{ecsu_id}/monthly")
@@ -995,42 +1073,69 @@ async def ecsu_monthly(
     ecsu_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """本月累積 kWh — 用 energy_kwh_imp 累積值差 (last - first) over month window.
+    """本月累積 kWh — 用 last - first 累積能量差 over month-to-date window.
 
-    對齊 DB 真實 schema：parameter_code='energy_kwh_imp' 累積能量 (kWh)
-    用 last - first 取月內累積差 (比 power × time 積分簡單且精準)
+    M-PM-237 Phase B+C 重寫：mapping layer 對齊 driver 真實 parameter_code
+    （aem_drb: ba1 → ba1_ae_imp / ba1-3 → ba1_3_ae_imp；cpm23/cpm12d → energy_kwh_imp）
+
+    Phase D：5 sec TTL in-mem cache。
     """
+    cached = _cache_get("monthly", ecsu_id)
+    if cached is not None:
+        return cached
+
     ecsu = await db.get(FndEcsu, ecsu_id)
     if ecsu is None:
         raise HTTPException(status_code=404, detail=f"ecsu_id {ecsu_id} not found")
 
-    # M-P11-E03 / M-P11-E05: 同 realtime — circuit_code 大小寫對齊修
-    sql = """
-        SELECT COALESCE(SUM(a.sign * COALESCE(r.kwh_delta, 0)), 0) AS monthly_kwh,
-               COUNT(DISTINCT a.assgn_id) AS active_bindings
-        FROM fnd_ecsu_circuit_assgn a
-        LEFT JOIN LATERAL (
+    bindings = (await db.execute(
+        select(FndEcsuCircuitAssgn).where(
+            FndEcsuCircuitAssgn.ecsu_id == ecsu_id,
+            FndEcsuCircuitAssgn.enabled == True,
+        )
+    )).scalars().all()
+
+    total_kwh = 0.0
+    active = 0
+    binding_details: list[dict[str, Any]] = []
+
+    for b in bindings:
+        param = map_circuit_to_energy_param(b.circuit_code, b.device_id)
+        row_d = (await db.execute(text("""
             SELECT MAX(value) - MIN(value) AS kwh_delta
             FROM trx_reading
-            WHERE device_id = a.device_id
-              AND LOWER(circuit_code) = LOWER(a.circuit_code)
-              AND parameter_code = 'energy_kwh_imp'
+            WHERE device_id = :device_id
+              AND parameter_code = :param_code
               AND ts >= date_trunc('month', NOW())
-        ) r ON true
-        WHERE a.ecsu_id = :ecsu_id
-          AND a.enabled = TRUE
-    """
-    row = (await db.execute(text(sql), {"ecsu_id": ecsu_id})).fetchone()
+        """), {"device_id": b.device_id, "param_code": param})).fetchone()
 
-    return {
+        delta = float(row_d[0]) if row_d is not None and row_d[0] is not None else None
+        if delta is not None:
+            total_kwh += b.sign * delta
+            active += 1
+
+        binding_details.append({
+            "assgn_id": b.assgn_id,
+            "device_id": b.device_id,
+            "circuit_code": b.circuit_code,
+            "parameter_code": param,
+            "sign": b.sign,
+            "kwh_delta": delta,
+        })
+
+    result = {
         "ecsu_id": ecsu_id,
         "ecsu_code": ecsu.ecsu_code,
         "ecsu_name": ecsu.ecsu_name,
-        "monthly_kwh": float(row[0]) if row and row[0] is not None else 0.0,
-        "active_bindings": int(row[1]) if row and row[1] is not None else 0,
+        "monthly_kwh": total_kwh,
+        "active_bindings": active,
+        "total_bindings": len(bindings),
         "window": "month_to_date",
-        "parameter_code": "energy_kwh_imp",
+        "bindings": binding_details,
+        "cached": False,
     }
+    _cache_put("monthly", ecsu_id, {**result, "cached": True})
+    return result
 
 
 # ========== /admin/billing ==========
