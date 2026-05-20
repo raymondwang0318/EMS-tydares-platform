@@ -646,6 +646,57 @@ async def update_device(
     return {"status": "updated", "edge_config_version": new_version}
 
 
+# M-PM-241 §2.1: batch 清全部 placeholder（業主 5/19 明示「一鍵清除全部」UX）
+# 註冊順序 IMPORTANT: 此 endpoint **必先** /devices/{device_id} 否則 FastAPI
+# 會把 'placeholders' 誤匹配為 device_id 走 single delete route → 404
+@router.delete("/devices/placeholders")
+async def cleanup_placeholders(db: AsyncSession = Depends(get_db)):
+    """一鍵清除全部 ScanWizard placeholder（device_id LIKE '_placeholder_%'）.
+
+    M-PM-241 §2.1 業主 5/19 明示「一鍵清除全部掃描佔位」UX 補。
+    對齊 M-PM-226 §三 transaction 雙保險 pattern（BEGIN → count before → DELETE → count=0 → COMMIT）.
+    對齊 M-PM-227 ScanWizard rollback bug 修法既建（本卷補 UI gap；不擾 rollback 路徑）.
+    """
+    # 採證 before count + 清單（拿 device_id 給 audit log）
+    rows = (await db.execute(text("""
+        SELECT device_id, edge_id FROM ems_device
+        WHERE device_id LIKE '_placeholder\\_%' ESCAPE '\\'
+    """))).fetchall()
+    deleted_devices = [{"device_id": r[0], "edge_id": r[1]} for r in rows]
+    deleted_count = len(deleted_devices)
+
+    if deleted_count > 0:
+        # DELETE batch
+        await db.execute(text("""
+            DELETE FROM ems_device
+            WHERE device_id LIKE '_placeholder\\_%' ESCAPE '\\'
+        """))
+
+        # audit log
+        db.add(EmsEvent(
+            event_kind="operation",
+            severity="warn",
+            actor="admin",
+            message=f"batch cleanup placeholders: deleted {deleted_count} row(s)",
+            data_json={"deleted_count": deleted_count, "deleted_devices": deleted_devices},
+        ))
+
+    await db.commit()
+
+    # 採證 after count（雙保險；應 = 0）
+    after_count = (await db.execute(text("""
+        SELECT COUNT(*) FROM ems_device
+        WHERE device_id LIKE '_placeholder\\_%' ESCAPE '\\'
+    """))).scalar()
+
+    return {
+        "status": "cleaned",
+        "deleted_count": deleted_count,
+        "remaining_count": after_count,  # 應 = 0；雙保險 verify
+        "deleted_devices": deleted_devices,
+    }
+
+
 @router.delete("/devices/{device_id}")
 async def soft_delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
     from datetime import datetime, timezone as tz
