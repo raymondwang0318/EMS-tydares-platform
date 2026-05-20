@@ -12,6 +12,7 @@ import Reports from './pages/Reports';
 import Trends from './pages/Trends';   // M-PM-202: 趨勢圖獨立分項
 import IrDevices from './pages/IrDevices';
 import ThermalView from './pages/ThermalView';
+import RemoteIO from './pages/RemoteIO';   // M-PM-240 Phase A: 遠端 I/O 監控頁（mock 階段）
 
 const { Title, Paragraph } = Typography;
 
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="/billing" element={<BillingStandard />} />
           <Route path="/ir-devices" element={<IrDevices />} />
           <Route path="/thermal/all" element={<ThermalView />} />
+          <Route path="/io" element={<RemoteIO />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/trends" element={<Trends />} />
           <Route path="/config" element={<ConfigPlaceholder />} />

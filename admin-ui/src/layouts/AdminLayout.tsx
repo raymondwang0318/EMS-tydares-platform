@@ -13,6 +13,7 @@ import {
   FireOutlined,
   CameraOutlined,
   LineChartOutlined,
+  ApiOutlined,
 } from '@ant-design/icons';
 // M-PM-215 / T-AdminUI-002 方向 B：feature flag 控制設備型號 menu 顯示
 import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
@@ -35,6 +36,8 @@ const menuItems = [
   { key: '/billing', icon: <DollarOutlined />, label: '電價規則' },
   { key: '/ir-devices', icon: <FireOutlined />, label: 'IR 標籤管理' },
   { key: '/thermal/all', icon: <CameraOutlined />, label: '熱力圖即時監控' },
+  // M-PM-240 Phase A：遠端 I/O 監控頁（6 場域 × 9 風扇；vault SSOT v1.0；mock 階段）
+  { key: '/io', icon: <ApiOutlined />, label: '遠端 I/O' },
   { key: '/reports', icon: <BarChartOutlined />, label: '報表' },
   // M-PM-202：趨勢圖獨立分項；跟報表同級
   { key: '/trends', icon: <LineChartOutlined />, label: '趨勢圖' },
