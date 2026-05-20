@@ -40,10 +40,17 @@ import {
 
 const { Text } = Typography;
 
+// M-PM-242 §3.3 / M-P11-E12: 加遠端 I/O 類型（業主 5/20『Edge 管理掃描設備按鈕還沒把遠端 I/O 加進來』）
+// backend M-P12-055 §3.2 device_circuits.py 已加 tcs300b03_di × 16 + tcs300b04_do × 16
+// 對齊 vault SSOT v1.0：6 控制箱 × 4 device = 24 fleet（slave 1-3 TCS300B03 DI；slave 4 TCS300B04 DO）
+// ⚠️ Edge 端 PROBE_ORDER + scanner SUPPORTED_TYPES 仍待 P10C 補（M-P12-055 §二 升報移交）；
+// P11E frontend 提供下拉選項；scan 觸發後 backend ingest 識別需 P10C driver source ready
 const DEVICE_TYPES = [
   { value: 'cpm12d', label: 'CPM-12D' },
   { value: 'cpm23', label: 'CPM-23' },
   { value: 'aem_drb', label: 'AEM-DRB' },
+  { value: 'tcs300b03_di', label: 'TCS300B03 數位輸入 (DI16)' },
+  { value: 'tcs300b04_do', label: 'TCS300B04 數位輸出 (DO16)' },
 ];
 
 type WizardStep = 'config' | 'scanning' | 'confirm';
@@ -164,7 +171,9 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     const real = devices.filter(
       (d) => !d.device_id.startsWith('_placeholder') && !d.device_id.startsWith('_scan-'),
     );
-    const KNOWN_TYPES = ['cpm12d', 'cpm23', 'aem_drb', 'tcs300b03'];
+    // M-PM-242 §3.3: 加 tcs300b03_di / tcs300b04_do（device_id prefix 推導 type）
+    // 舊 'tcs300b03' 保留 backward compat（早期命名；ScanWizard inferDefaults 用 prefix match）
+    const KNOWN_TYPES = ['cpm12d', 'cpm23', 'aem_drb', 'tcs300b03_di', 'tcs300b04_do', 'tcs300b03'];
     const entries: ScanPlanEntry[] = real.map((d, i) => {
       const slaveMatch = d.device_id.match(/slave(\d+)/);
       const typeMatch = KNOWN_TYPES.find((t) => d.device_id.startsWith(`${t}-`));
