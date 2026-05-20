@@ -191,6 +191,34 @@ export function useDeleteDevice() {
   });
 }
 
+/**
+ * M-PM-241 §2.2 / M-P11-E11: 一鍵清除全部 placeholder（業主 5/19 chat『一鍵清除全部』）
+ * - 對接 M-P12-054 §2.1 backend: DELETE /v1/admin/devices/placeholders
+ * - response: { status, deleted_count, remaining_count, deleted_devices: [{device_id, edge_id}] }
+ * - transaction + audit log + GET filter deleted_at IS NULL 自動隱藏
+ */
+export interface CleanupPlaceholdersResp {
+  status: string;
+  deleted_count: number;
+  remaining_count: number;
+  deleted_devices: Array<{ device_id: string; edge_id: string }>;
+}
+
+export function useCleanupPlaceholders() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<CleanupPlaceholdersResp> => {
+      const { data } = await api.delete<CleanupPlaceholdersResp>(
+        '/admin/devices/placeholders',
+      );
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.devices.all });
+    },
+  });
+}
+
 export function useCreateCommand() {
   return useMutation({
     mutationFn: async (req: CreateCommandRequest): Promise<{ command_id: string }> => {

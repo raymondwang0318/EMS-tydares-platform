@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag } from 'antd';
-import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined } from '@ant-design/icons';
+import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined, ClearOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { StatusTag } from '../components/common/StatusTag';
 import {
@@ -17,6 +17,8 @@ import {
   useRenameDevice,
   useRenameEdgeHostname,
   useRenameEdgeName,
+  useDeleteDevice,
+  useCleanupPlaceholders,
   type EmsDevice,
 } from '../hooks/useScanWizard';
 
@@ -70,6 +72,72 @@ export default function Edges() {
 
   const renameHostname = useRenameEdgeHostname();
   const renameEdgeName = useRenameEdgeName();
+
+  // M-PM-241 §2.2 / M-P11-E11: 一鍵清除全部 placeholder
+  const cleanupPlaceholders = useCleanupPlaceholders();
+
+  /**
+   * 開「清除全部掃描佔位」二次確認 dialog（v1.4 §61 兌現；輸入 CLEAR 才 enable）
+   * 1. 預覽：呼叫 batch endpoint 前先 fetch 一次 GET /admin/devices 算 placeholder 數 → 不必，confirm 後直 DELETE，response 含 deleted_count
+   * 2. 業主輸入「CLEAR」字串確認 enable 按鈕
+   * 3. 二次確認後 DELETE /admin/devices/placeholders（batch；M-P12-054）
+   */
+  const openCleanupDialog = () => {
+    let confirmInput = '';
+    const modalRef = modal.confirm({
+      title: '🧹 清除全部掃描佔位',
+      icon: <ClearOutlined style={{ color: '#ff4d4f' }} />,
+      width: 520,
+      content: (
+        <div>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="本操作將清除 fleet 全部 `_placeholder_*` 設備"
+            description="trx_reading 歷史保留（永不動）；ems_device 軟刪除（deleted_at 設值；GET filter 自動隱藏）。對齊 M-PM-241 §2.2 業主明示『一鍵清除全部』。"
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            ⚠️ 二次確認：請輸入「CLEAR」字串解鎖按鈕（v1.4 §61 危險操作確認）
+          </Text>
+          <Input
+            placeholder="輸入 CLEAR 解鎖確認按鈕"
+            style={{ marginTop: 8 }}
+            onChange={(e) => {
+              confirmInput = e.target.value;
+              modalRef.update({
+                okButtonProps: { danger: true, disabled: confirmInput !== 'CLEAR' },
+              });
+            }}
+          />
+        </div>
+      ),
+      okText: '確認清除全部',
+      cancelText: '取消',
+      okButtonProps: { danger: true, disabled: true },
+      onOk: async () => {
+        if (confirmInput !== 'CLEAR') {
+          message.warning('請輸入 CLEAR 確認');
+          return Promise.reject();
+        }
+        try {
+          const res = await cleanupPlaceholders.mutateAsync();
+          if (res.deleted_count === 0) {
+            message.info('無 placeholder 可清除（fleet 已乾淨）');
+          } else {
+            message.success(
+              `已清除 ${res.deleted_count} 個 placeholder（影響 ${new Set(res.deleted_devices.map((d) => d.edge_id)).size} 個 Edge）`,
+            );
+          }
+          refetch();
+        } catch (err) {
+          const e = err as { response?: { data?: { detail?: string } }; message?: string };
+          message.error(`清除失敗：${e?.response?.data?.detail ?? e?.message ?? '未知錯誤'}`);
+          throw err; // 保 dialog open
+        }
+      },
+    });
+  };
 
   const pendingCount = useMemo(
     () => (edges ?? []).filter((e) => e.status === 'pending' || e.status === 'pending_replace').length,
@@ -346,9 +414,15 @@ export default function Edges() {
           <Title level={3} style={{ margin: 0 }}>Edge 管理</Title>
           <Text type="secondary">核可、撤銷、維護、指紋漂移流程及 config 同步狀態</Text>
         </div>
-        <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
-          重新整理
-        </Button>
+        <Space>
+          {/* M-PM-241 §2.2 / M-P11-E11：一鍵清除全部掃描佔位（業主 5/19 chat 明示；二次確認 §61 兌現）*/}
+          <Button icon={<ClearOutlined />} danger onClick={openCleanupDialog}>
+            清除全部掃描佔位
+          </Button>
+          <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
+            重新整理
+          </Button>
+        </Space>
       </Space>
 
       {pendingCount > 0 && (
@@ -439,7 +513,79 @@ export default function Edges() {
 function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
   const { data: devices, isLoading, error, refetch } = useEdgeDevices(edgeId);
   const renameDevice = useRenameDevice();
-  const { message } = App.useApp();
+  const deleteDevice = useDeleteDevice();
+  const { message, modal } = App.useApp();
+
+  /**
+   * M-PM-241 §2.2 / M-P11-E11: per-row 手動刪除 device（業主 5/19 chat 明示）
+   * - 主要對 placeholder 用；但同 confirm dialog pattern 也支援 real device（業主自決）
+   * - 二次確認：輸入完整 device_id 或場域代碼解鎖（v1.4 §61）
+   * - DELETE /v1/admin/devices/{device_id}（既有 soft_delete_device）
+   */
+  const openDeleteDeviceDialog = (dev: EmsDevice) => {
+    const isPlaceholder = dev.device_id.startsWith('_placeholder_');
+    let confirmInput = '';
+    const expectedConfirm = dev.device_id;
+    const modalRef = modal.confirm({
+      title: isPlaceholder ? '🗑 刪除掃描佔位' : '🗑 刪除設備',
+      icon: <DeleteOutlined style={{ color: '#ff4d4f' }} />,
+      width: 520,
+      content: (
+        <div>
+          <Alert
+            type={isPlaceholder ? 'info' : 'warning'}
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={isPlaceholder ? '掃描佔位（ScanWizard bootstrap）' : '⚠️ 真實設備（非掃描佔位）'}
+            description={isPlaceholder
+              ? '本操作軟刪除（deleted_at 設值；GET filter 自動隱藏）；trx_reading 歷史保留。'
+              : '⚠️ 真實設備刪除會影響聚合與綁定；trx_reading 歷史保留；ECSU 綁定可能變孤兒。請確認此 device 已停用。'}
+          />
+          <div style={{ marginBottom: 8 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>device_id:</Text>{' '}
+            <Text code copyable={{ text: dev.device_id }}>{dev.device_id}</Text>
+          </div>
+          {dev.device_name && (
+            <div style={{ marginBottom: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>名稱:</Text>{' '}
+              <Text>{dev.device_name}</Text>
+            </div>
+          )}
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            ⚠️ 二次確認：請輸入完整 device_id 解鎖按鈕（v1.4 §61）
+          </Text>
+          <Input
+            placeholder={`輸入 ${expectedConfirm.length > 24 ? expectedConfirm.slice(0, 24) + '…' : expectedConfirm} 解鎖`}
+            style={{ marginTop: 8 }}
+            onChange={(e) => {
+              confirmInput = e.target.value;
+              modalRef.update({
+                okButtonProps: { danger: true, disabled: confirmInput !== expectedConfirm },
+              });
+            }}
+          />
+        </div>
+      ),
+      okText: '確認刪除',
+      cancelText: '取消',
+      okButtonProps: { danger: true, disabled: true },
+      onOk: async () => {
+        if (confirmInput !== expectedConfirm) {
+          message.warning('device_id 不對；請輸入完整 device_id');
+          return Promise.reject();
+        }
+        try {
+          await deleteDevice.mutateAsync(dev.device_id);
+          message.success(`已刪除 ${isPlaceholder ? '掃描佔位' : '設備'}：${dev.device_id}`);
+          refetch();
+        } catch (err) {
+          const e = err as { response?: { data?: { detail?: string } }; message?: string };
+          message.error(`刪除失敗：${e?.response?.data?.detail ?? e?.message ?? '未知錯誤'}`);
+          throw err;
+        }
+      },
+    });
+  };
 
   // M-PM-123 補修：子表 loadingStuck fallback（10s 超時）— 同 useEdges loadingStuck pattern
   // 對齊老王 2026-05-06 chat 「展開 + 按鈕後子表載入中 >1 min」regression
@@ -485,45 +631,72 @@ function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
     );
   }
 
-  const rows = (devices ?? []).filter((d) => d.device_type !== '_placeholder');
+  // M-PM-241 §2.2 / M-P11-E11: 顯示 placeholder rows（業主可手動刪）；既有 filter `d.device_type !== '_placeholder'`
+  // 因 useEdgeDevices transform device_kind ('other') → device_type 不會是 '_placeholder' 字串 → filter 永遠 true
+  // (5/19 業主截圖 E06 placeholder 顯示 = filter 不工作的證據)
+  // 修法：放行所有 row 顯示；placeholder row 由業務命名 + [🗑] icon 提供 UX 區別
+  const rows = devices ?? [];
   if (rows.length === 0) return <Text type="secondary">尚無已註冊設備</Text>;
 
   const columns: ColumnsType<EmsDevice> = [
-    { title: 'Device ID', dataIndex: 'device_id', key: 'device_id', width: 260 },
+    {
+      title: 'Device ID',
+      dataIndex: 'device_id',
+      key: 'device_id',
+      width: 260,
+      render: (v: string) => {
+        const isPlaceholder = v.startsWith('_placeholder_');
+        return (
+          <Space size={4}>
+            {isPlaceholder && <Tag color="orange">掃描佔位</Tag>}
+            <Text code={isPlaceholder} style={isPlaceholder ? { color: '#fa8c16' } : undefined}>{v}</Text>
+          </Space>
+        );
+      },
+    },
     {
       title: '名稱',
       dataIndex: 'device_name',
       key: 'name',
-      render: (v: string | null, row: EmsDevice) => (
-        <Text
-          editable={{
-            tooltip: '點擊編輯設備名稱',
-            onChange: async (val: string) => {
-              const next = val.trim();
-              if (!next || next === (v ?? '')) return;
-              try {
-                await renameDevice.mutateAsync({
-                  deviceId: row.device_id,
-                  deviceName: next,
-                  edgeId,
-                });
-                message.success('設備名稱已更新');
-              } catch (e) {
-                message.error(`更新設備名稱失敗：${(e as Error).message}`);
-              }
-            },
-          }}
-        >
-          {v ?? '—'}
-        </Text>
-      ),
+      render: (v: string | null, row: EmsDevice) => {
+        const isPlaceholder = row.device_id.startsWith('_placeholder_');
+        if (isPlaceholder) {
+          return <Text type="secondary">{v ?? '掃描佔位（Wizard bootstrap）'}</Text>;
+        }
+        return (
+          <Text
+            editable={{
+              tooltip: '點擊編輯設備名稱',
+              onChange: async (val: string) => {
+                const next = val.trim();
+                if (!next || next === (v ?? '')) return;
+                try {
+                  await renameDevice.mutateAsync({
+                    deviceId: row.device_id,
+                    deviceName: next,
+                    edgeId,
+                  });
+                  message.success('設備名稱已更新');
+                } catch (e) {
+                  message.error(`更新設備名稱失敗：${(e as Error).message}`);
+                }
+              },
+            }}
+          >
+            {v ?? '—'}
+          </Text>
+        );
+      },
     },
     {
       title: '類型',
       dataIndex: 'device_type',
       key: 'type',
       width: 120,
-      render: (v: string) => <Tag color="blue">{v}</Tag>,
+      render: (v: string, row: EmsDevice) => {
+        const isPlaceholder = row.device_id.startsWith('_placeholder_');
+        return <Tag color={isPlaceholder ? 'orange' : 'blue'}>{v}</Tag>;
+      },
     },
     {
       title: '建立時間',
@@ -531,6 +704,22 @@ function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
       key: 'created',
       width: 180,
       render: (v: string) => (v ? new Date(v).toLocaleString('zh-TW') : '—'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 90,
+      align: 'center',
+      render: (_: unknown, row: EmsDevice) => (
+        <Tooltip title={row.device_id.startsWith('_placeholder_') ? '刪除掃描佔位' : '刪除設備（危險；trx_reading 保留）'}>
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => openDeleteDeviceDialog(row)}
+          />
+        </Tooltip>
+      ),
     },
   ];
 
