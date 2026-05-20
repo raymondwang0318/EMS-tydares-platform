@@ -8,10 +8,12 @@
  * - 即時統計三 Card：即時 kW（30s refetch）/ 本月 kWh / 綁定數
  * - 編輯 ECSU 基本資料 Modal（reuse §二 form 6 欄）
  * - 下半部多對多綁定列表 + [+ 新增綁定] dialog 級聯 Edge→Device→Circuit
- *   - circuit_code 採 schema-driven dropdown（M-PM-228/229；by-kind hardcode 26 / 1 / 1 circuits）
+ *   - circuit_code 採 schema-driven dropdown（M-PM-228/229；by-kind hardcode 34 / 1 / 1 circuits）
  *     → 對接 GET /v1/admin/device-models/by-kind/{device_kind}/circuits
- *     → 設備選後依 device_kind 載入；OptGroup 分組 main / branch
+ *     → 設備選後依 device_kind 載入；OptGroup 分組 main / branch / three_phase
  *     → 設備換 → circuit_code reset；schema-driven 取代 M-P11-070 §三 自決 a 自由輸入
+ *   - M-PM-238 §A：AEM-DRB 加 8 條 three_phase 虛擬迴路 (ba1-3/ba4-6/ba7-9/ba10-12 + bb1-3/...)
+ *     backend M-P12-052 commit a889d77 §C ready；OptGroup「三相用電 Three-Phase」第三組
  *   - sign 預設 +1（消耗）；可切 -1（反向潮流 / 太陽能反送）
  *   - enabled 預設 true
  * - 編輯綁定 dialog（只 sign / enabled / 備註；device_id + circuit_code 不可改）
@@ -552,6 +554,10 @@ export default function EcsuDetail() {
                 if (circuits.length === 0) return [];
                 const main = circuits.filter((c) => c.category === 'main');
                 const branch = circuits.filter((c) => c.category === 'branch');
+                // M-PM-238 §A：三相用電 Three-Phase（依託 M-PM-237 §C backend 8 條虛擬迴路
+                // ba1-3/ba4-6/ba7-9/ba10-12 + bb1-3/bb4-6/bb7-9/bb10-12；commit a889d77）
+                // backend SUM(ba1+ba2+ba3 power_total) 經 expand_circuit_codes() + IN clause SUM
+                const threePhase = circuits.filter((c) => c.category === 'three_phase');
                 const groups: { label: string; options: { value: string; label: string }[] }[] = [];
                 if (main.length > 0) {
                   groups.push({
@@ -566,6 +572,15 @@ export default function EcsuDetail() {
                   groups.push({
                     label: `分支迴路 Branch (${branch.length})`,
                     options: branch.map((c) => ({
+                      value: c.code,
+                      label: `${c.code} · ${c.name}`,
+                    })),
+                  });
+                }
+                if (threePhase.length > 0) {
+                  groups.push({
+                    label: `三相用電 Three-Phase (${threePhase.length})`,
+                    options: threePhase.map((c) => ({
                       value: c.code,
                       label: `${c.code} · ${c.name}`,
                     })),

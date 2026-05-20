@@ -74,14 +74,16 @@ export interface EcsuFormBody {
  * Device-kind circuit option（M-PM-228 backend hardcode constants）
  * 對應 GET /v1/admin/device-models/by-kind/{device_kind}/circuits
  *
- * - aem_drb: 26 circuits（2 main: ma/mb + 24 branch: ba1~ba24）
+ * - aem_drb: 34 circuits（2 main: ma/mb + 24 branch: ba1-12/bb1-12 + 8 three_phase）
+ *   三相虛擬迴路（M-PM-237 §C + M-P12-052 commit a889d77）：
+ *   ba1-3 / ba4-6 / ba7-9 / ba10-12 / bb1-3 / bb4-6 / bb7-9 / bb10-12
  * - cpm12d:  1 circuit  (main: ma)
  * - cpm23:   1 circuit  (main: ma)
  */
 export interface DeviceCircuitOption {
   code: string;
   name: string;
-  category: 'main' | 'branch';
+  category: 'main' | 'branch' | 'three_phase';
 }
 
 export interface DeviceCircuitsResp {
