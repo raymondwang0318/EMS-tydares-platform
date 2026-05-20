@@ -59,11 +59,28 @@ _CPM12D_CIRCUITS: list[CircuitDef] = [
     {"code": "ma", "name": "主迴路", "category": "main"},
 ]
 
+# M-PM-242 §3.2: 遠端 I/O 模組（採證 01_Edge/遠端IO_腳位功能模板_TCS300B03_TCS300B04.md v1.0）
+# TCS300B03 = 16 DI（每控制箱 × 3 顆 slave 1/2/3）
+# TCS300B04 = 16 DO（每控制箱 × 1 顆 slave 4）
+# channel name 對應風扇 manual/auto/run/overload signal（業主 5/19 4 張電路圖）
+_TCS300B03_DI_CIRCUITS: list[CircuitDef] = [
+    {"code": f"di_ch{i}", "name": f"DI {i}", "category": "digital_input"}
+    for i in range(1, 17)
+]
+
+_TCS300B04_DO_CIRCUITS: list[CircuitDef] = [
+    {"code": f"do_ch{i}", "name": f"DO {i}", "category": "digital_output"}
+    for i in range(1, 17)
+]
+
 
 DEVICE_MODEL_CIRCUITS: dict[str, list[CircuitDef]] = {
     "aem_drb": _AEM_DRB_CIRCUITS,
     "cpm23": _CPM23_CIRCUITS,
     "cpm12d": _CPM12D_CIRCUITS,
+    # M-PM-242 §3.2 遠端 I/O
+    "tcs300b03_di": _TCS300B03_DI_CIRCUITS,
+    "tcs300b04_do": _TCS300B04_DO_CIRCUITS,
 }
 
 
