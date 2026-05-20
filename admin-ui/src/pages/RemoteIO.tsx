@@ -267,7 +267,7 @@ function FanGrid({ site }: { site: SiteConfig }) {
       {site.xun_count > 0 && (
         <>
           <Title level={5} style={{ marginTop: 24 }}>
-            內循環風扇（{site.xun_count} 顆）
+            內循環風扇（{site.xun_count} 組）
           </Title>
           <Row gutter={[12, 12]}>
             {Array.from({ length: site.xun_count }).map((_, i) => (
