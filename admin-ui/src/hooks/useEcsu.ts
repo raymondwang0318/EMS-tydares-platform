@@ -335,11 +335,26 @@ export function buildEcsuTree(rows: EcsuRow[]): Array<EcsuRow & { children?: Ecs
       }
     }
   });
-  // M-PM-231: sort by ecsu_id ASC（老王 5/17 chat 明示「ID 由小至大排列，GO」）
-  // 原邏輯 (display_seq ?? 999) 優先導致 KW-08 (display_seq < 999) 排在 KW-01~07 (display_seq null) 之前。
-  // 業主明示純 ID 排序；display_seq 欄位保留於 schema 但暫不影響 sort（未來如業主要改回可加 toggle）。
-  // 樹狀子節點同遞迴 sort。
-  const sortFn = (a: EcsuRow, b: EcsuRow) => a.ecsu_id - b.ecsu_id;
+  // M-PM-248: ecsu_code natural sort（老王 5/20 chat『隱藏 ID、排序改代碼、規則 KW-**』+ 5/21 拍板）
+  // 翻新 M-PM-231 (commit 0c83ec8 ecsu_id ASC)；改用 ecsu_code 'KW-' 後數字 parseInt 比大小
+  // → KW-1 < KW-2 < … < KW-9 < KW-10 < … < KW-21 (natural sort；非字典序 KW-10 < KW-2)
+  // 4 拍板對齊（M-PM-248 §三）：
+  //   1. 排序：KW- 後數字 natural sort
+  //   2. 格式：KW-\d+（不限位數；不強制補零）
+  //   3. ID 隱藏範圍：只列表 column；ecsu_id 路由保留
+  //   4. 樹狀子節點同步 natural sort（父子一致）
+  // Fallback：不符 KW-\d+ 的舊資料排末尾（字串序 tie-break）
+  const KW_REGEX = /^KW-(\d+)$/;
+  const sortFn = (a: EcsuRow, b: EcsuRow) => {
+    const aMatch = a.ecsu_code.match(KW_REGEX);
+    const bMatch = b.ecsu_code.match(KW_REGEX);
+    if (aMatch && bMatch) {
+      return parseInt(aMatch[1], 10) - parseInt(bMatch[1], 10);
+    }
+    if (aMatch) return -1; // KW-\d+ 排前
+    if (bMatch) return 1;
+    return a.ecsu_code.localeCompare(b.ecsu_code); // 兩者皆非 KW-\d+ → 字串序
+  };
   roots.sort(sortFn);
   byId.forEach((n) => n.children?.sort(sortFn));
   return roots;

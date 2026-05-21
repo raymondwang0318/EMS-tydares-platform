@@ -204,7 +204,8 @@ export default function Ecsu() {
   };
 
   const columns: ColumnsType<EcsuRow & { children?: EcsuRow[] }> = [
-    { title: 'ID', dataIndex: 'ecsu_id', key: 'ecsu_id', width: 70 },
+    // M-PM-248 §三-3 拍板：列表只隱藏 ID column；詳情頁 / 編輯 dialog 仍顯 ecsu_id（工程除錯用）
+    // 既有 M-PM-219 / M-P11-069 ID 列第一欄 → 本卷移除
     { title: '代碼', dataIndex: 'ecsu_code', key: 'ecsu_code', width: 130 },
     { title: '名稱', dataIndex: 'ecsu_name', key: 'ecsu_name' },
     {
@@ -327,7 +328,15 @@ export default function Ecsu() {
           <Form.Item
             name="ecsu_code"
             label="代碼"
-            rules={[{ required: true, message: '代碼必填' }]}
+            extra="格式：KW-\d+（如 KW-01 / KW-21；不限位數；natural sort 不依賴補零）"
+            rules={[
+              { required: true, message: '代碼必填' },
+              // M-PM-248 §三-2 拍板：代碼規則 KW-\d+；client-side 校驗
+              {
+                pattern: /^KW-\d+$/,
+                message: '代碼必須符合格式 KW-\\d+（例：KW-01 / KW-21）',
+              },
+            ]}
           >
             <Input placeholder="例：KW-01" disabled={!!editing} />
           </Form.Item>
