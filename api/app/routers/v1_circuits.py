@@ -40,6 +40,20 @@ router = APIRouter(
 # ============================================================================
 
 
+def _resolve_device_kind_from_id(device_id: str) -> str | None:
+    """從 device_id prefix 推真實 device_kind.
+
+    ems_device.device_kind = 'modbus_meter'（粗類別退化；採證 M-PM-249 §二 implementation）；
+    真實 sub-type 在 device_id prefix（'aem_drb-...' / 'cpm23-...' / 'cpm12d-...' /
+    'tcs300b03_di-...' / 'tcs300b04_do-...'）.
+    """
+    from app.constants.device_circuits import DEVICE_MODEL_CIRCUITS
+    for kind in DEVICE_MODEL_CIRCUITS.keys():
+        if device_id.startswith(kind + "-") or device_id.startswith(kind + "_"):
+            return kind
+    return None
+
+
 async def _resolve_device_and_param(
     db: AsyncSession,
     device_id: str,
@@ -49,6 +63,8 @@ async def _resolve_device_and_param(
     """Verify device exists + circuit_code legal for device_kind; return (device_kind, edge_id, parameter_code).
 
     Raises HTTPException 404 / 422 accordingly.
+
+    NB: device_kind 從 device_id prefix 推（ems_device.device_kind = 'modbus_meter' 粗類別退化）.
     """
     row = (await db.execute(text("""
         SELECT device_id, device_kind, edge_id
@@ -57,7 +73,17 @@ async def _resolve_device_and_param(
     """), {"device_id": device_id})).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"device_id '{device_id}' not found")
-    device_kind, edge_id = row[1], row[2]
+    edge_id = row[2]
+
+    # 真實 sub-type 從 device_id prefix 推（非 row[1] 的 'modbus_meter'）
+    device_kind = _resolve_device_kind_from_id(device_id)
+    if device_kind is None:
+        raise HTTPException(status_code=422, detail={
+            "error": "device_kind_unresolved",
+            "device_id": device_id,
+            "device_kind_db": row[1],
+            "message": "device_id prefix not in DEVICE_MODEL_CIRCUITS keys",
+        })
 
     circuits = get_circuits(device_kind)
     if not circuits:

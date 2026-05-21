@@ -1296,6 +1296,19 @@ async def get_circuits_by_device_kind(device_kind: str):
 # 業務需求：Pananora 房間-迴路綁定下拉用（避免 frontend N+1 call: list devices → per device list circuits）
 
 
+def _resolve_device_kind_from_id(device_id: str) -> str | None:
+    """從 device_id prefix 推真實 device_kind（aem_drb / cpm23 / cpm12d / tcs300b03_di / tcs300b04_do）.
+
+    ems_device.device_kind 在 V2-final 退化成粗類別 'modbus_meter'；真實 sub-type 編碼在
+    device_id prefix（採證：'aem_drb-TYDARES-E04-slave20', 'cpm12d-...', 'cpm23-...'）；對齊
+    device_circuits._parse_device_kind() 既有 pattern.
+    """
+    for kind in DEVICE_MODEL_CIRCUITS.keys():
+        if device_id.startswith(kind + "-") or device_id.startswith(kind + "_"):
+            return kind
+    return None
+
+
 @router.get("/circuits")
 async def list_all_circuits(
     device_kind: str | None = Query(None, description="filter aem_drb / cpm23 / cpm12d / tcs300b03_di / tcs300b04_do"),
@@ -1307,11 +1320,12 @@ async def list_all_circuits(
     M-PM-249 §二 工作包 B #1（Pananora 整合方案丙）：每筆 row =（device, circuit）對；
     避免前端 N+1 呼叫先列 device 再 per device 列 circuit。
 
-    底層：JOIN ems_device × DEVICE_MODEL_CIRCUITS (Python const) flatten；不查 cagg/trx。
+    底層：JOIN ems_device × DEVICE_MODEL_CIRCUITS (Python const) flatten；不查 cagg/trx.
+
+    NB: 真實 device sub-type 從 device_id prefix 推（ems_device.device_kind 退化成
+    'modbus_meter'；採證 M-PM-249 §二 implementation）.
     """
     stmt = select(EmsDevice).where(EmsDevice.deleted_at.is_(None))
-    if device_kind:
-        stmt = stmt.where(EmsDevice.device_kind == device_kind)
     if edge_id:
         stmt = stmt.where(EmsDevice.edge_id == edge_id)
     stmt = stmt.order_by(EmsDevice.edge_id, EmsDevice.device_id)
@@ -1319,13 +1333,19 @@ async def list_all_circuits(
 
     result = []
     for d in devices:
-        circuits = get_circuits(d.device_kind)
+        resolved_kind = _resolve_device_kind_from_id(d.device_id)
+        if resolved_kind is None:
+            continue  # 無對應 sub-type schema（例如 IR/thermal）
+        if device_kind and resolved_kind != device_kind:
+            continue  # filter
+        circuits = get_circuits(resolved_kind)
         if not circuits:
-            continue  # device_kind 沒對應 circuit schema 則略過
+            continue
         for c in circuits:
             result.append({
                 "device_id": d.device_id,
-                "device_kind": d.device_kind,
+                "device_kind": resolved_kind,  # 真實 sub-type（非 'modbus_meter'）
+                "device_kind_db": d.device_kind,  # debug 用：原 DB column 值
                 "edge_id": d.edge_id,
                 "display_name": d.display_name,
                 "circuit_code": c["code"],
