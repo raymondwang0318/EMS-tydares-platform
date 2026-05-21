@@ -195,6 +195,115 @@ async def _query_trx_time_bucket(
     return (await db.execute(text(sql), params)).fetchall()
 
 
+async def _query_cagg_view_for_ecsu(
+    db: AsyncSession,
+    view: str,
+    bucket_col: str,
+    ecsu_id: int,
+    from_ts: datetime,
+    to_ts: datetime,
+    parameter_codes: list[str],
+):
+    """M-PM-253 §一 ecsu_id 路徑專用 — mapping layer pattern.
+
+    Bypass r.circuit_code JOIN（M-PM-237 root cause C：driver flat 寫 'Ma' 與 binding
+    logical 'ba1' 不 match）。改用 Python per-binding 推 parameter_code（map_circuit_to_*_param）
+    + SQL filter (device_id, parameter_code) IN pairs + sign multiply.
+
+    對應 parameter_codes user-supplied filter（典型用法：傳 ['ma_ae_imp','energy_kwh_imp']
+    或 ['ba1_ae_imp'] 等 specific）：取 binding mapped param ∩ user param 才有 data.
+
+    user 不傳 parameter_codes 時實質要求「該 ECSU 全 binding 的所有能量參數」→
+    本路徑用 mapping layer 推 binding's energy + power param 作為候選 set.
+    """
+    from app.constants.device_circuits import map_circuit_to_energy_param, map_circuit_to_power_param
+
+    # 1. 採證 ECSU 是否存在 + 列 bindings (enabled only)
+    bindings = (await db.execute(text("""
+        SELECT a.assgn_id, a.device_id, a.circuit_code, a.sign, e.ecsu_code
+        FROM fnd_ecsu_circuit_assgn a
+        JOIN fnd_ecsu e ON e.ecsu_id = a.ecsu_id
+        WHERE a.ecsu_id = :ecsu_id AND a.enabled = true
+    """), {"ecsu_id": ecsu_id})).fetchall()
+
+    if not bindings:
+        return []
+
+    ecsu_code = bindings[0][4]
+
+    # 2. per-binding 推 parameter_code（energy + power）;構造 (device_id, parameter_code, sign) tuples
+    # NB: caller user_param_codes 用於 final filter；mapping 候選為 superset.
+    binding_param_signs: dict[tuple[str, str], int] = {}
+    for b in bindings:
+        _, device_id, circuit_code, sign, _ = b
+        # 取得能量 + 即時功率 param（caller 通常傳 energy；power 也支援為了 future-compat）
+        e_param = map_circuit_to_energy_param(circuit_code, device_id)
+        p_param = map_circuit_to_power_param(circuit_code, device_id)
+        binding_param_signs[(device_id, e_param)] = sign
+        binding_param_signs[(device_id, p_param)] = sign
+
+    # 3. 與 user_param_codes 交集（filter 出 user 真正要的 metric）
+    user_params = set(parameter_codes)
+    allowed_pairs = [(dev, pc) for (dev, pc) in binding_param_signs.keys() if pc in user_params]
+    if not allowed_pairs:
+        return []
+
+    # 4. SQL：cagg view filter (device_id, parameter_code) IN allowed_pairs；不 JOIN circuit_code
+    # NB: PostgreSQL 不直接支援 IN tuple via asyncpg 一個 placeholder；用 (UNNEST ... ZIP) or two arrays
+    devices = [p[0] for p in allowed_pairs]
+    params_arr = [p[1] for p in allowed_pairs]
+
+    # NB: SQLAlchemy text() 對 `:name::text[]` cast syntax 撞 parser bug；改用 CAST() 顯式
+    sql = text(f"""
+        SELECT r.{bucket_col} AS ts,
+               r.device_id, r.parameter_code,
+               r.avg_value, r.min_value, r.max_value,
+               r.first_value, r.last_value
+        FROM {view} r
+        WHERE r.{bucket_col} >= :from_ts
+          AND r.{bucket_col} < :to_ts
+          AND (r.device_id, r.parameter_code) IN (
+              SELECT d, p FROM UNNEST(CAST(:devices AS text[]), CAST(:params AS text[])) AS t(d, p)
+          )
+        ORDER BY r.{bucket_col}, r.parameter_code
+    """)
+
+    rows = (await db.execute(sql, {
+        "from_ts": from_ts, "to_ts": to_ts,
+        "devices": devices, "params": params_arr,
+    })).fetchall()
+
+    # 5. Python 端 group by (bucket, parameter_code)，sum value * sign
+    # output tuple 對齊既有 (ts, group_key, parameter_code, avg, min, max, first, last, energy_delta)
+    bucket_pcode_agg: dict[tuple, dict] = {}
+    for r in rows:
+        ts, dev, pc, avg_v, min_v, max_v, first_v, last_v = r
+        sign = binding_param_signs.get((dev, pc), 0)
+        if sign == 0:
+            continue
+        key = (ts, pc)
+        agg = bucket_pcode_agg.setdefault(key, {
+            "avg": 0.0, "min": None, "max": None,
+            "first": 0.0, "last": 0.0,
+        })
+        if avg_v is not None: agg["avg"] += avg_v * sign
+        if min_v is not None: agg["min"] = min_v if agg["min"] is None else min(agg["min"], min_v)
+        if max_v is not None: agg["max"] = max_v if agg["max"] is None else max(agg["max"], max_v)
+        if first_v is not None: agg["first"] += first_v * sign
+        if last_v is not None: agg["last"] += last_v * sign
+
+    # 6. 輸出對齊既有 row tuple shape
+    out = []
+    for (ts, pc), agg in sorted(bucket_pcode_agg.items()):
+        out.append((
+            ts, ecsu_code, pc,
+            agg["avg"], agg["min"], agg["max"],
+            agg["first"], agg["last"],
+            agg["last"] - agg["first"],
+        ))
+    return out
+
+
 async def _query_cagg_view(
     db: AsyncSession,
     view: str,
@@ -207,11 +316,24 @@ async def _query_cagg_view(
     circuit_id: str | None,
     ecsu_id: int | None = None,  # M-PM-253 §一
 ):
-    """15min / 1day / 1month: cagg view 直查."""
+    """15min / 1day / 1month: cagg view 直查.
+
+    ecsu_id 路徑（M-PM-253 §一）：用 mapping layer pattern bypass r.circuit_code JOIN
+    （M-PM-237 root cause C：trx_reading.circuit_code 退化成 'Ma'/'_all'；binding circuit_code
+    用 logical 'ba1' 等不 match）.
+    """
     params: dict = {
         "from_ts": from_ts, "to_ts": to_ts,
         "param_codes": parameter_codes,
     }
+
+    # ============================================================
+    # M-PM-253 §一 ecsu_id 路徑 — mapping layer pattern (bypass r.circuit_code JOIN)
+    # ============================================================
+    if ecsu_id is not None:
+        return await _query_cagg_view_for_ecsu(
+            db, view, bucket_col, ecsu_id, from_ts, to_ts, parameter_codes,
+        )
 
     if group_by == "device":
         where_clauses = [
