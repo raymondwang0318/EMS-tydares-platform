@@ -28,6 +28,8 @@ export interface EcsuRow {
   display_seq: number | null;
   enabled: boolean;
   remark_desc?: string | null;
+  // M-PM-255 / M-P12-061: fnd_ecsu region nullable column（業主自填區域；schema +1）
+  region?: string | null;
 }
 
 export interface EcsuCircuitsResp {
@@ -68,6 +70,8 @@ export interface EcsuFormBody {
   display_seq?: number | null;
   enabled?: boolean;
   remark_desc?: string | null;
+  // M-PM-255 / M-P12-061: region 對接 backend _ECSU_ALLOWED_FIELDS
+  region?: string | null;
 }
 
 /**

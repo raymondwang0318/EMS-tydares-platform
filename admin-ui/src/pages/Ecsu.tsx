@@ -105,6 +105,8 @@ export default function Ecsu() {
     const columns: ExportColumn<ExportRow>[] = [
       { key: 'ecsu_id', header: 'ID' },
       { key: 'ecsu_code', header: '代碼' },
+      // M-PM-253 §二-3 / M-PM-255: region column 加 ECSU 列表 Excel（對齊列表 UI + 業主自填）
+      { key: 'region', header: '區域', render: (r) => r.region ?? '' },
       { key: 'ecsu_name', header: '名稱' },
       { key: 'parent_id', header: '上層 ID', render: (r) => r.parent_id ?? '—' },
       { key: '_circuits_count', header: '綁定迴路數', render: (r) => r._circuits_count ?? '—' },
@@ -150,6 +152,7 @@ export default function Ecsu() {
       display_seq: 1,
       enabled: true,
       remark_desc: '',
+      region: '',
     });
     setModalOpen(true);
   };
@@ -164,6 +167,7 @@ export default function Ecsu() {
       display_seq: row.display_seq,
       enabled: row.enabled,
       remark_desc: row.remark_desc ?? '',
+      region: row.region ?? '',
     });
     setModalOpen(true);
   };
@@ -207,6 +211,14 @@ export default function Ecsu() {
     // M-PM-248 §三-3 拍板：列表只隱藏 ID column；詳情頁 / 編輯 dialog 仍顯 ecsu_id（工程除錯用）
     // 既有 M-PM-219 / M-P11-069 ID 列第一欄 → 本卷移除
     { title: '代碼', dataIndex: 'ecsu_code', key: 'ecsu_code', width: 130 },
+    // M-PM-253 §二-3 / M-PM-255: 區域 region column（M-P12-061 backend ready；老王自填）
+    {
+      title: '區域',
+      dataIndex: 'region',
+      key: 'region',
+      width: 130,
+      render: (v: string | null) => v || <Text type="secondary">—</Text>,
+    },
     { title: '名稱', dataIndex: 'ecsu_name', key: 'ecsu_name' },
     {
       title: '上層 ID',
@@ -346,6 +358,10 @@ export default function Ecsu() {
             rules={[{ required: true, message: '名稱必填' }]}
           >
             <Input placeholder="例：農技大樓總幹線" />
+          </Form.Item>
+          {/* M-PM-253 §二-2 / M-PM-255: 區域 region 欄位（M-P12-061 backend ready；業主自填）*/}
+          <Form.Item name="region" label="區域" extra="自由文字；例：育成 Aa 區 / C 區 / 警衛區（業主自填；可留空）">
+            <Input placeholder="例：育成 Aa 區" maxLength={50} />
           </Form.Item>
           <Form.Item name="parent_id" label="上層 ID（選填；樹狀層級）">
             <InputNumber style={{ width: '100%' }} placeholder="若為根節點留空" />
