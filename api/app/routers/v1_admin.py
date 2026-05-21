@@ -1291,6 +1291,50 @@ async def get_circuits_by_device_kind(device_kind: str):
     }
 
 
+# ========== /admin/circuits ==========
+# M-PM-249 §二 工作包 B endpoint #1：device × circuit 二維 flatten
+# 業務需求：Pananora 房間-迴路綁定下拉用（避免 frontend N+1 call: list devices → per device list circuits）
+
+
+@router.get("/circuits")
+async def list_all_circuits(
+    device_kind: str | None = Query(None, description="filter aem_drb / cpm23 / cpm12d / tcs300b03_di / tcs300b04_do"),
+    edge_id: str | None = Query(None, description="filter by edge_id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """列全部迴路（device × circuit 二維 flatten）.
+
+    M-PM-249 §二 工作包 B #1（Pananora 整合方案丙）：每筆 row =（device, circuit）對；
+    避免前端 N+1 呼叫先列 device 再 per device 列 circuit。
+
+    底層：JOIN ems_device × DEVICE_MODEL_CIRCUITS (Python const) flatten；不查 cagg/trx。
+    """
+    stmt = select(EmsDevice).where(EmsDevice.deleted_at.is_(None))
+    if device_kind:
+        stmt = stmt.where(EmsDevice.device_kind == device_kind)
+    if edge_id:
+        stmt = stmt.where(EmsDevice.edge_id == edge_id)
+    stmt = stmt.order_by(EmsDevice.edge_id, EmsDevice.device_id)
+    devices = (await db.execute(stmt)).scalars().all()
+
+    result = []
+    for d in devices:
+        circuits = get_circuits(d.device_kind)
+        if not circuits:
+            continue  # device_kind 沒對應 circuit schema 則略過
+        for c in circuits:
+            result.append({
+                "device_id": d.device_id,
+                "device_kind": d.device_kind,
+                "edge_id": d.edge_id,
+                "display_name": d.display_name,
+                "circuit_code": c["code"],
+                "circuit_name": c["name"],
+                "circuit_category": c["category"],
+            })
+    return {"circuits": result, "total": len(result)}
+
+
 # ========== /admin/electric-parameters ==========
 
 @router.get("/electric-parameters")
