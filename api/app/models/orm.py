@@ -273,6 +273,9 @@ class FndEcsu(Base):
     display_seq: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     remark_desc: Mapped[str | None] = mapped_column(String(500))
+    # M-PM-255: 區域欄位（業主 5/21 chat 明示「區域加 ECSU 每筆欄位」）;
+    # 報表 Excel 第 1 欄；業主自由文字（非 enum）；既有 ECSU row 預設 NULL.
+    region: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

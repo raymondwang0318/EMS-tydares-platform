@@ -729,6 +729,7 @@ async def list_ecsu(db: AsyncSession = Depends(get_db)):
             "parent_id": e.parent_id,
             "display_seq": e.display_seq,
             "enabled": e.enabled,
+            "region": e.region,  # M-PM-255 老王 5/21 拍板「區域加 ECSU 每筆欄位」
         }
         for e in rows
     ]
@@ -737,7 +738,8 @@ async def list_ecsu(db: AsyncSession = Depends(get_db)):
 @router.post("/ecsu")
 async def create_ecsu(body: dict[str, Any] = Body(...), db: AsyncSession = Depends(get_db)):
     row = FndEcsu(**{k: body[k] for k in body if k in {
-        "ecsu_code", "ecsu_name", "parent_id", "display_seq", "enabled", "remark_desc"
+        "ecsu_code", "ecsu_name", "parent_id", "display_seq", "enabled", "remark_desc",
+        "region",  # M-PM-255
     }})
     db.add(row)
     await db.commit()
@@ -748,7 +750,8 @@ async def create_ecsu(body: dict[str, Any] = Body(...), db: AsyncSession = Depen
 # M-PM-217 Phase A：補 PUT + DELETE（業主 5/12 PUT 405 阻塞修；4/18 G1 預警兌現）
 
 _ECSU_ALLOWED_FIELDS = {
-    "ecsu_code", "ecsu_name", "parent_id", "display_seq", "enabled", "remark_desc"
+    "ecsu_code", "ecsu_name", "parent_id", "display_seq", "enabled", "remark_desc",
+    "region",  # M-PM-255
 }
 
 
@@ -797,6 +800,7 @@ async def update_ecsu(
         "display_seq": row.display_seq,
         "enabled": row.enabled,
         "remark_desc": row.remark_desc,
+        "region": row.region,  # M-PM-255
         "updated_fields": sorted(update_fields.keys()),
     }
 

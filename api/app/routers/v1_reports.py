@@ -56,6 +56,7 @@ async def energy_report(
     parameter_code: str | None = Query(None, description="DEPRECATED: 舊單一 metric；保留向下相容"),
     device_ids: list[str] | None = Query(None, description="filter device_id list"),
     circuit_id: str | None = Query(None, description="AEM-DRB1 per-circuit filter (e.g. ba1, bb12)"),
+    ecsu_id: int | None = Query(None, description="M-PM-253 §一: filter to single ECSU (forces group_by=ecsu)"),
     db: AsyncSession = Depends(get_db),
 ):
     """能源報表（T-Reports-001 backend 擴）.
@@ -65,6 +66,7 @@ async def energy_report(
       - 15min / 1day(daily) / 1month(monthly): continuous aggregate view 直查
     parameter_codes: List[str] 多 metric 一次回；舊 parameter_code: str 保留 deprecated alias
     circuit_id: AEM-DRB1 per-circuit filter；用 parameter_code LIKE '{circuit_id}_%'
+    ecsu_id: M-PM-253 §一 — 給定 ecsu_id 即聚合該 ECSU；自動 force group_by=ecsu.
     """
     # === Validation ===
     if granularity not in _VALID_GRANULARITY:
@@ -76,6 +78,10 @@ async def energy_report(
 
     if from_ts >= to_ts:
         raise HTTPException(status_code=422, detail="from_ts must be < to_ts")
+
+    # M-PM-253 §一: ecsu_id 自動 force group_by=ecsu（避免 caller 忘了改 group_by）
+    if ecsu_id is not None:
+        group_by = "ecsu"
 
     # parameter_codes 優先；舊 parameter_code 為 fallback alias（deprecated）
     params_list: list[str]
@@ -102,7 +108,7 @@ async def energy_report(
         view, bucket_col = _CAGG_VIEW[granularity]
         rows = await _query_cagg_view(
             db, view, bucket_col, group_by,
-            from_ts, to_ts, params_list, device_ids, circuit_id,
+            from_ts, to_ts, params_list, device_ids, circuit_id, ecsu_id,
         )
 
     points = [
@@ -199,6 +205,7 @@ async def _query_cagg_view(
     parameter_codes: list[str],
     device_ids: list[str] | None,
     circuit_id: str | None,
+    ecsu_id: int | None = None,  # M-PM-253 §一
 ):
     """15min / 1day / 1month: cagg view 直查."""
     params: dict = {
@@ -230,7 +237,7 @@ async def _query_cagg_view(
             ORDER BY {bucket_col}
         """
     else:
-        # ecsu 分組（既有路徑保留）
+        # ecsu 分組（既有路徑保留）+ M-PM-253 §一 ecsu_id filter
         where_clauses = [
             f"r.{bucket_col} >= :from_ts",
             f"r.{bucket_col} < :to_ts",
@@ -242,6 +249,12 @@ async def _query_cagg_view(
         if circuit_id:
             where_clauses.append("r.parameter_code LIKE :circuit_prefix")
             params["circuit_prefix"] = f"{circuit_id}_%"
+        if ecsu_id is not None:
+            # M-PM-253 §一: 單一 ECSU filter；reuse 既有 ecsu group_by SQL，加 WHERE a.ecsu_id 限縮.
+            # NB: M-P12-052 mapping layer 既建處理 ECSU realtime/monthly per-binding；本路徑走
+            # cagg group_by ecsu_code，sign-based SUM (e.g. 主+分支 sign=+1, 抵減 sign=-1).
+            where_clauses.append("a.ecsu_id = :ecsu_id")
+            params["ecsu_id"] = ecsu_id
         where_sql = " AND ".join(where_clauses)
 
         sql = f"""
