@@ -102,9 +102,9 @@ async def energy_report(
         raise HTTPException(status_code=422, detail="parameter_codes must not be empty")
 
     # === 路由：cagg view vs trx_reading time_bucket ===
+    # M-P12-063 Phase C: ecsu_id 路徑直接 route 到 helper (保 params_list=None 語意)
     if granularity in _BUCKET_INTERVAL:
         # 5min / 1hr: trx_reading + time_bucket
-        # M-P12-063 Phase C: ecsu_id 路徑用 mapping layer (不走 device 路徑 device_ids 為空)
         if ecsu_id is not None:
             rows = await _query_trx_time_bucket_for_ecsu(
                 db, _BUCKET_INTERVAL[granularity], ecsu_id,
@@ -118,10 +118,15 @@ async def energy_report(
     else:
         # 15min / 1day / 1month: cagg view
         view, bucket_col = _CAGG_VIEW[granularity]
-        rows = await _query_cagg_view(
-            db, view, bucket_col, group_by,
-            from_ts, to_ts, params_list or [], device_ids, circuit_id, ecsu_id,
-        )
+        if ecsu_id is not None:
+            rows = await _query_cagg_view_for_ecsu(
+                db, view, bucket_col, ecsu_id, from_ts, to_ts, params_list,
+            )
+        else:
+            rows = await _query_cagg_view(
+                db, view, bucket_col, group_by,
+                from_ts, to_ts, params_list or [], device_ids, circuit_id, ecsu_id,
+            )
 
     points = [
         {
