@@ -362,6 +362,22 @@ export default function Reports() {
     'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
   ], []);
 
+  // M-P11-E24 Phase B: ENERGY_PARAM_SET — totalKwh 計算用（只 *_ae_imp + energy_kwh_imp/total 變體）
+  // 對齊 backend mapping layer (M-P12-061 §3.2):
+  //   cpm12d main → energy_kwh_total
+  //   cpm23  main → energy_kwh_imp
+  //   aem_drb main → ma_ae_imp / mb_ae_imp
+  //   aem_drb branch → ba1-12_ae_imp / bb1-12_ae_imp
+  //   aem_drb three_phase → ba1_3_ae_imp / ba4_6_ae_imp 等 8 個 _ae_imp 群組
+  const ENERGY_PARAM_SET = useMemo(() => new Set([
+    'energy_kwh_imp', 'energy_kwh_total',
+    'ma_ae_imp', 'mb_ae_imp',
+    ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_ae_imp`),
+    ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_ae_imp`),
+    'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
+    'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+  ]), []);
+
   // M-PM-253 §二: ECSU 模式 mapping (Excel column rendering reuse)
   // backend 自動聚合 → 只 power_total 與 energy_kwh_imp 對 ECSU 有 reliable 意義
   // voltage / frequency / current / power_factor 對 ECSU 無 mapping → null
@@ -631,16 +647,44 @@ export default function Reports() {
     [energyPoints],
   );
   // 老王 5/8 chat / M-PM-161 §AC 5 / M-PM-162 §4.2：「時段總用電量」= 全期累積差（last 點 - first 點）
-  // 不再 sum(energy_delta)；改用累積值（last_value）first vs last 差；對齊老王讀電表面板數的直覺
+  // M-P11-E24 Phase B（M-PM-253 §二 動作 1+4 後修）：ECSU 模式 → energyReportData 為來源
+  // - 既有 energyPoints 路徑（device-mode fetchEnergy）已 deprecated；ECSU 模式不再以 energyDevice 為基準
+  // - 按 parameter_code 分組（每個對應一種 device-type 累積 metric），各組取最早/最晚 ts 的 last_value → delta → 加總
+  // - 5min/1hr 路徑 last_value=null（M-P12-025 §7.2）→ skip 該 parameter_code（無法精確計累積；UI 已有 alert 提示）
   const totalKwh = useMemo(() => {
-    if (energyPoints.length === 0) return 0;
-    // 找出 ts 排序前後 last_value，計算累積差
-    const sorted = [...energyPoints].sort((a, b) => a.ts.localeCompare(b.ts));
-    const firstLast = sorted[0]?.last_value ?? sorted[0]?.avg_value ?? 0;
-    const lastLast = sorted[sorted.length - 1]?.last_value ?? sorted[sorted.length - 1]?.avg_value ?? 0;
-    const delta = (lastLast ?? 0) - (firstLast ?? 0);
-    return delta > 0 ? delta : 0; // 防 cagg 邊界 negative；累積值不可能減少
-  }, [energyPoints]);
+    if (!energyReportData?.points?.length) return 0;
+    // 按 parameter_code group → 每組記 first/last (依 ts 排序) 的 last_value
+    const byParam = new Map<
+      string,
+      { first: number; last: number; firstTs: string; lastTs: string }
+    >();
+    energyReportData.points.forEach((p) => {
+      if (!ENERGY_PARAM_SET.has(p.parameter_code)) return;
+      if (p.last_value == null) return; // 5min/1hr 路徑 last_value=null → skip
+      const v = p.last_value;
+      const existing = byParam.get(p.parameter_code);
+      if (!existing) {
+        byParam.set(p.parameter_code, {
+          first: v, last: v, firstTs: p.ts, lastTs: p.ts,
+        });
+      } else {
+        if (p.ts < existing.firstTs) {
+          existing.first = v;
+          existing.firstTs = p.ts;
+        }
+        if (p.ts > existing.lastTs) {
+          existing.last = v;
+          existing.lastTs = p.ts;
+        }
+      }
+    });
+    let total = 0;
+    byParam.forEach((g) => {
+      const delta = g.last - g.first;
+      if (delta > 0) total += delta; // 防 cagg 邊界 negative；累積值不可能減少
+    });
+    return total;
+  }, [energyReportData, ENERGY_PARAM_SET]);
 
   // M-PM-253 §二 動作 4: helper for Excel cell number formatting
   const fmtNum = (v: unknown, precision: number): string => {
@@ -968,15 +1012,16 @@ export default function Reports() {
                         precision={1}
                         suffix="kWh"
                       />
-                      {energyQueriedRange && (
+                      {/* M-P11-E24 Phase B: 改用 energyHistoryRange (ECSU 模式 hook trigger) 取代 energyQueriedRange (legacy device-mode) */}
+                      {energyHistoryRange && (
                         <div style={{ color: '#888', fontSize: 12, marginTop: 8 }}>
-                          {energyQueriedRange[0].format('YYYY-MM-DD HH:mm')} ~{' '}
-                          {energyQueriedRange[1].format('YYYY-MM-DD HH:mm')}
+                          {energyHistoryRange[0].format('YYYY-MM-DD HH:mm')} ~{' '}
+                          {energyHistoryRange[1].format('YYYY-MM-DD HH:mm')}
                           {' · '}
                           {/* Bug 1 修（M-PM-099 §一）：用 selector state 即時連動，不用 range 推導 snapshot */}
                           {energyGranularity} 粒度
                           {' · '}
-                          {energyHistoryRows.length || energyPoints.length} 點
+                          {energyHistoryRows.length} 點
                         </div>
                       )}
                     </Card>
@@ -1033,30 +1078,26 @@ export default function Reports() {
                   />
                 )}
                 {/* M-PM-198：HistoryTable render 條件擴 CPM；老王 5/4 chat「下拉沒連動」key 重 mount 既有保留 */}
-                {(!energyDeviceHasCircuit || effectiveViewMode === 'device' || (effectiveViewMode === 'circuit' && energyCircuitId)) && (
-                  <HistoryTable
-                    key={`energy-htbl-${energyGranularity}-${energyDevice}-${energyCircuitId ?? ''}`}
-                    columns={energyColumns}
-                    data={energyHistoryRows}
-                    loading={energyHistoryLoading}
-                    granularity={energyGranularity}
-                    emptyText={energyHistoryRange ? '時段內無資料' : '請按「查詢」載入資料'}
-                    title={
-                      <Space>
-                        <span>
-                          用電履歷列表 — {energyDevice ?? '尚未選擇設備'}
-                          {energyDeviceHasCircuit && effectiveViewMode === 'circuit' && energyCircuitId
-                            ? ` · ${energyCircuitId}`
-                            : ''}
-                        </span>
-                        <Tag key={`energy-gran-tag-${energyGranularity}`} color="blue">{energyGranularity}</Tag>
-                        {effectiveViewMode === 'circuit' && energyCircuitId && (
-                          <Tag color="purple">依迴路</Tag>
-                        )}
-                      </Space>
-                    }
-                  />
-                )}
+                {/* M-P11-E24 Phase A: title 改 ECSU label（取代既有 stale energyDevice device_id） */}
+                <HistoryTable
+                  key={`energy-htbl-${energyGranularity}-ecsu-${selectedEcsuId ?? ''}`}
+                  columns={energyColumns}
+                  data={energyHistoryRows}
+                  loading={energyHistoryLoading}
+                  granularity={energyGranularity}
+                  emptyText={energyHistoryRange ? '時段內無資料' : '請按「查詢」載入資料'}
+                  title={
+                    <Space>
+                      <span>
+                        用電履歷列表 — {selectedEcsuForExcel
+                          ? `${selectedEcsuForExcel.ecsu_code} · ${selectedEcsuForExcel.region ?? '—'} · ${selectedEcsuForExcel.ecsu_name}`
+                          : '尚未選擇 ECSU'}
+                      </span>
+                      <Tag key={`energy-gran-tag-${energyGranularity}`} color="blue">{energyGranularity}</Tag>
+                      <Tag color="purple">ECSU 聚合</Tag>
+                    </Space>
+                  }
+                />
                 {/* 5min/1hr 路徑首尾值 null 提示（M-P12-025 §7.2）*/}
                 {(energyGranularity === '5min' || energyGranularity === '1hr') &&
                   energyHistoryRows.length > 0 && (
