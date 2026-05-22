@@ -84,31 +84,43 @@ async def energy_report(
         group_by = "ecsu"
 
     # parameter_codes 優先；舊 parameter_code 為 fallback alias（deprecated）
-    params_list: list[str]
+    # M-P12-063 Phase C fix: ecsu_id 模式 + 未指定 parameter_codes → 不 fallback 過時 default,
+    # 改傳 None 進 _query_*_for_ecsu，由 helper 自動用 mapping layer 推全 binding params.
+    params_list: list[str] | None
     if parameter_codes:
         params_list = parameter_codes
     elif parameter_code:
         params_list = [parameter_code]
+    elif ecsu_id is not None:
+        # ecsu_id 模式：不 fallback；自動用 binding mapped params (M-P12-063 Phase C)
+        params_list = None
     else:
-        # 預設保留既有行為（避免空回不知道用戶意圖）
+        # device 模式：保留既有行為（避免空回不知道用戶意圖）
         params_list = ["tot_input_active_energy"]
 
-    if not params_list:
+    if params_list is not None and len(params_list) == 0:
         raise HTTPException(status_code=422, detail="parameter_codes must not be empty")
 
     # === 路由：cagg view vs trx_reading time_bucket ===
     if granularity in _BUCKET_INTERVAL:
         # 5min / 1hr: trx_reading + time_bucket
-        rows = await _query_trx_time_bucket(
-            db, _BUCKET_INTERVAL[granularity], group_by,
-            from_ts, to_ts, params_list, device_ids, circuit_id,
-        )
+        # M-P12-063 Phase C: ecsu_id 路徑用 mapping layer (不走 device 路徑 device_ids 為空)
+        if ecsu_id is not None:
+            rows = await _query_trx_time_bucket_for_ecsu(
+                db, _BUCKET_INTERVAL[granularity], ecsu_id,
+                from_ts, to_ts, params_list,
+            )
+        else:
+            rows = await _query_trx_time_bucket(
+                db, _BUCKET_INTERVAL[granularity], group_by,
+                from_ts, to_ts, params_list or [], device_ids, circuit_id,
+            )
     else:
         # 15min / 1day / 1month: cagg view
         view, bucket_col = _CAGG_VIEW[granularity]
         rows = await _query_cagg_view(
             db, view, bucket_col, group_by,
-            from_ts, to_ts, params_list, device_ids, circuit_id, ecsu_id,
+            from_ts, to_ts, params_list or [], device_ids, circuit_id, ecsu_id,
         )
 
     points = [
@@ -195,6 +207,104 @@ async def _query_trx_time_bucket(
     return (await db.execute(text(sql), params)).fetchall()
 
 
+async def _query_trx_time_bucket_for_ecsu(
+    db: AsyncSession,
+    interval: str,
+    ecsu_id: int,
+    from_ts: datetime,
+    to_ts: datetime,
+    parameter_codes: list[str] | None,
+):
+    """M-P12-063 Phase C — 5min/1hr ecsu_id 路徑 mapping layer pattern.
+
+    對齊 _query_cagg_view_for_ecsu 邏輯，但走 trx_reading + time_bucket（無 cagg view）。
+    NB: trx_reading 無 first/last 直接欄；只回 avg/min/max；first/last/energy_delta 為 None
+    （與 _query_trx_time_bucket device 路徑同行為）.
+
+    parameter_codes=None → 自動用 binding mapped params 全部（energy + power superset）.
+    """
+    from app.constants.device_circuits import map_circuit_to_energy_param, map_circuit_to_power_param
+
+    # interval 受控白名單（雙保險防注入；對齊 _query_trx_time_bucket）
+    if interval not in {"5 minutes", "1 hour"}:
+        raise HTTPException(status_code=500, detail=f"unsupported bucket interval: {interval}")
+
+    # 1. 採證 ECSU bindings (enabled only)
+    bindings = (await db.execute(text("""
+        SELECT a.assgn_id, a.device_id, a.circuit_code, a.sign, e.ecsu_code
+        FROM fnd_ecsu_circuit_assgn a
+        JOIN fnd_ecsu e ON e.ecsu_id = a.ecsu_id
+        WHERE a.ecsu_id = :ecsu_id AND a.enabled = true
+    """), {"ecsu_id": ecsu_id})).fetchall()
+    if not bindings:
+        return []
+
+    ecsu_code = bindings[0][4]
+
+    # 2. per-binding 推 parameter_code → (device_id, parameter_code) -> sign
+    binding_param_signs: dict[tuple[str, str], int] = {}
+    for b in bindings:
+        _, device_id, circuit_code, sign, _ = b
+        e_param = map_circuit_to_energy_param(circuit_code, device_id)
+        p_param = map_circuit_to_power_param(circuit_code, device_id)
+        binding_param_signs[(device_id, e_param)] = sign
+        binding_param_signs[(device_id, p_param)] = sign
+
+    # 3. 過濾 user_param_codes（None = 全收）
+    if parameter_codes is None:
+        allowed_pairs = list(binding_param_signs.keys())
+    else:
+        user_params = set(parameter_codes)
+        allowed_pairs = [(d, p) for (d, p) in binding_param_signs.keys() if p in user_params]
+    if not allowed_pairs:
+        return []
+
+    devices = [p[0] for p in allowed_pairs]
+    params_arr = [p[1] for p in allowed_pairs]
+
+    # 4. SQL: trx_reading + time_bucket; (device_id, parameter_code) IN UNNEST
+    sql = text(f"""
+        SELECT time_bucket(INTERVAL '{interval}', r.ts) AS bucket,
+               r.device_id, r.parameter_code,
+               AVG(r.value) AS avg_value,
+               MIN(r.value) AS min_value,
+               MAX(r.value) AS max_value
+        FROM trx_reading r
+        WHERE r.ts >= :from_ts
+          AND r.ts < :to_ts
+          AND (r.device_id, r.parameter_code) IN (
+              SELECT d, p FROM UNNEST(CAST(:devices AS text[]), CAST(:params AS text[])) AS t(d, p)
+          )
+        GROUP BY bucket, r.device_id, r.parameter_code
+        ORDER BY bucket, r.parameter_code
+    """)
+    rows = (await db.execute(sql, {
+        "from_ts": from_ts, "to_ts": to_ts,
+        "devices": devices, "params": params_arr,
+    })).fetchall()
+
+    # 5. Python group by (bucket, parameter_code) + sum value * sign
+    bucket_pcode_agg: dict[tuple, dict] = {}
+    for r in rows:
+        ts, dev, pc, avg_v, min_v, max_v = r
+        sign = binding_param_signs.get((dev, pc), 0)
+        if sign == 0:
+            continue
+        key = (ts, pc)
+        agg = bucket_pcode_agg.setdefault(key, {"avg": 0.0, "min": None, "max": None})
+        if avg_v is not None: agg["avg"] += avg_v * sign
+        if min_v is not None: agg["min"] = min_v if agg["min"] is None else min(agg["min"], min_v)
+        if max_v is not None: agg["max"] = max_v if agg["max"] is None else max(agg["max"], max_v)
+
+    # 6. 輸出對齊既有 row tuple shape (avg/min/max；first/last/energy_delta = None)
+    out = []
+    for (ts, pc), agg in sorted(bucket_pcode_agg.items()):
+        out.append((ts, ecsu_code, pc,
+                    agg["avg"], agg["min"], agg["max"],
+                    None, None, None))
+    return out
+
+
 async def _query_cagg_view_for_ecsu(
     db: AsyncSession,
     view: str,
@@ -202,7 +312,7 @@ async def _query_cagg_view_for_ecsu(
     ecsu_id: int,
     from_ts: datetime,
     to_ts: datetime,
-    parameter_codes: list[str],
+    parameter_codes: list[str] | None,
 ):
     """M-PM-253 §一 ecsu_id 路徑專用 — mapping layer pattern.
 
@@ -210,11 +320,9 @@ async def _query_cagg_view_for_ecsu(
     logical 'ba1' 不 match）。改用 Python per-binding 推 parameter_code（map_circuit_to_*_param）
     + SQL filter (device_id, parameter_code) IN pairs + sign multiply.
 
-    對應 parameter_codes user-supplied filter（典型用法：傳 ['ma_ae_imp','energy_kwh_imp']
-    或 ['ba1_ae_imp'] 等 specific）：取 binding mapped param ∩ user param 才有 data.
-
-    user 不傳 parameter_codes 時實質要求「該 ECSU 全 binding 的所有能量參數」→
-    本路徑用 mapping layer 推 binding's energy + power param 作為候選 set.
+    parameter_codes 語意（M-P12-063 Phase C 修）:
+      - None  → 自動用 binding mapped params 全部（energy + power superset）
+      - list  → user 指定 metric；取 binding mapped param ∩ user param 才有 data
     """
     from app.constants.device_circuits import map_circuit_to_energy_param, map_circuit_to_power_param
 
@@ -243,8 +351,12 @@ async def _query_cagg_view_for_ecsu(
         binding_param_signs[(device_id, p_param)] = sign
 
     # 3. 與 user_param_codes 交集（filter 出 user 真正要的 metric）
-    user_params = set(parameter_codes)
-    allowed_pairs = [(dev, pc) for (dev, pc) in binding_param_signs.keys() if pc in user_params]
+    # M-P12-063 Phase C: parameter_codes=None → 不 filter，全收 binding mapped params
+    if parameter_codes is None:
+        allowed_pairs = list(binding_param_signs.keys())
+    else:
+        user_params = set(parameter_codes)
+        allowed_pairs = [(dev, pc) for (dev, pc) in binding_param_signs.keys() if pc in user_params]
     if not allowed_pairs:
         return []
 
