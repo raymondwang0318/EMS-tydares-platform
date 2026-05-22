@@ -1,18 +1,18 @@
 /**
  * Trends — 趨勢圖獨立分項（M-PM-202；老王 5/9 16:35 chat）
  *
- * scope：從報表頁抽出 chart；sidebar 新 menu 跟報表同級。
- * - 設備 + 迴路 + RangePicker + granularity selectors（reuse Reports 邏輯模板）
- * - Demand chart（P/Q/S；reuse useEnergyReport + inferDemandMapping）
- * - 用電趨勢 LineChart（總功率 power_total 隨時間）
- * - 不含列表（HistoryTable 留 Reports 頁聚焦數據查詢）
+ * M-PM-253 §二 動作 1（老王 5/21 拍板）翻新：
+ * - 移除 device / circuit / viewMode / phaseMode / EdgeFilter 5 selectors
+ * - 加 ECSU 下拉（reuse useEcsuList + buildEcsuTree KW- natural sort）
+ * - 呼叫 /reports/energy?ecsu_id={id} force group_by=ecsu + mapping layer（M-P12-061 §3.2）
+ * - power_total trend 對 ECSU 模式繼續顯（mapping layer 對 aem_drb 推 ma_p_sum/ba1_p 等）
+ * - demand chart 因 backend mapping 不 cover demand_p → 對 ECSU 模式顯空（拍板 1 對齊）
  *
- * v1.4 §51 既有架構優先：100% reuse useEnergyReport / inferEnergyMapping / inferDemandMapping
- * 不重複實作 mapping 邏輯。
+ * 既有 Reports.tsx 設計參考 + reuse useEnergyReport hook
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Card, DatePicker, Empty, Radio, Select, Space, Spin, Typography,
+  Alert, Button, Card, DatePicker, Empty, Select, Space, Spin, Typography,
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
@@ -20,136 +20,99 @@ import {
   CartesianGrid, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
-import api from '../services/api';
 import { type Granularity } from '../components/HistoryTable';
-import {
-  useEnergyReport,
-  inferEnergyMapping,
-  mappingToParameterCodes,
-  inferDemandMapping,
-  demandMappingToCodes,
-  type PhaseMode,
-} from '../hooks/useEnergyReport';
-// M-PM-205: Edge filter（對齊報表頁 pattern；老王 5/9 16:50 chat）
-import { useEdges } from '../hooks/useEdges';
+import { useEnergyReport } from '../hooks/useEnergyReport';
+import { useEcsuList, buildEcsuTree } from '../hooks/useEcsu';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
-interface DeviceRow {
-  device_id: string;
-  edge_id?: string;
-  device_kind?: string;
-  display_name?: string | null;
-}
+// M-PM-253 §二: ECSU 模式 parameter_codes superset（對齊 backend mapping table）
+// reuse 同 Reports.tsx 的 ECSU_PARAM_SUPERSET（複製過來；未來可抽 hook 共享）
+const ECSU_PARAM_SUPERSET = [
+  'power_total', 'energy_kwh_imp',
+  'ma_p_sum', 'mb_p_sum', 'ma_ae_imp', 'mb_ae_imp',
+  ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
+  ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
+  ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_ae_imp`),
+  ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_ae_imp`),
+  'ba1_3_p_sum', 'ba4_6_p_sum', 'ba7_9_p_sum', 'ba10_12_p_sum',
+  'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
+  'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
+  'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+];
 
-const TRENDS_EDGE_FILTER_ALL = '__ALL__';
+// power_total 相關 parameter_code（所有 type 的 power 變體）
+const POWER_PARAM_SET = new Set([
+  'power_total',
+  'ma_p_sum', 'mb_p_sum',
+  ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
+  ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
+  'ba1_3_p_sum', 'ba4_6_p_sum', 'ba7_9_p_sum', 'ba10_12_p_sum',
+  'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
+]);
 
 export default function Trends() {
   const [range, setRange] = useState<[Dayjs, Dayjs]>([dayjs().subtract(24, 'hour'), dayjs()]);
-  const [allDevices, setAllDevices] = useState<DeviceRow[]>([]);
-  const [devicesLoading, setDevicesLoading] = useState(false);
-  const [device, setDevice] = useState<string | undefined>();
   const [granularity, setGranularity] = useState<Granularity>('15min');
-  const [phaseMode, setPhaseMode] = useState<PhaseMode>('3ph');
-  const [viewMode, setViewMode] = useState<'device' | 'circuit'>('device');
-  const [circuitId, setCircuitId] = useState<string | undefined>();
+  const [selectedEcsuId, setSelectedEcsuId] = useState<number | undefined>();
   const [queriedRange, setQueriedRange] = useState<[Dayjs, Dayjs] | null>(null);
-  // M-PM-205：Edge filter
-  const [edgeFilter, setEdgeFilter] = useState<string>(TRENDS_EDGE_FILTER_ALL);
-  const { data: edgesData } = useEdges();
 
-  // 載設備清單
-  useEffect(() => {
-    setDevicesLoading(true);
-    api.get('/admin/devices')
-      .then((r) => {
-        const items: DeviceRow[] = Array.isArray(r.data) ? r.data : r.data?.items ?? [];
-        setAllDevices(items.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'));
-      })
-      .catch(() => setAllDevices([]))
-      .finally(() => setDevicesLoading(false));
-  }, []);
-
-  // M-PM-205：filter by Edge
-  const devices = useMemo(
-    () =>
-      edgeFilter === TRENDS_EDGE_FILTER_ALL
-        ? allDevices
-        : allDevices.filter((d) => d.edge_id === edgeFilter),
-    [allDevices, edgeFilter],
-  );
-
-  // M-PM-205：Edge filter options（只列有 modbus_meter 的 Edge）
-  const edgeOptions = useMemo(() => {
-    const opts: { value: string; label: React.ReactNode }[] = [
-      { value: TRENDS_EDGE_FILTER_ALL, label: '全部 Edge' },
-    ];
-    const edgesWithMeter = new Set(allDevices.map((d) => d.edge_id).filter(Boolean));
-    (edgesData ?? []).forEach((e) => {
-      if (!edgesWithMeter.has(e.edge_id)) return;
-      opts.push({
-        value: e.edge_id,
-        label: (
-          <Space size={4}>
-            <span>{e.edge_id}</span>
-            {e.edge_name && e.edge_name !== e.edge_id && (
-              <Text type="secondary" style={{ fontSize: 11 }}>· {e.edge_name}</Text>
-            )}
-          </Space>
-        ),
+  // M-PM-253 §二: ECSU list + sortedEcsuOptions（label: KW-XX · 區域 · 名稱）
+  const { data: ecsuListData } = useEcsuList();
+  const sortedEcsus = useMemo(() => {
+    if (!ecsuListData) return [];
+    type Node = (typeof ecsuListData)[number] & { children?: Node[] };
+    const tree = buildEcsuTree(ecsuListData) as Node[];
+    const flat: typeof ecsuListData = [];
+    const walk = (nodes: Node[]) => {
+      nodes.forEach((n) => {
+        const { children, ...rest } = n;
+        flat.push(rest as (typeof ecsuListData)[number]);
+        if (children) walk(children);
       });
-    });
-    return opts;
-  }, [edgesData, allDevices]);
+    };
+    walk(tree);
+    return flat;
+  }, [ecsuListData]);
+
+  const ecsuSelectOptions = useMemo(
+    () =>
+      sortedEcsus.map((e) => ({
+        value: e.ecsu_id,
+        label: `${e.ecsu_code} · ${e.region ?? '—'} · ${e.ecsu_name}`,
+      })),
+    [sortedEcsus],
+  );
 
   useEffect(() => {
-    if (devices.length && !device) setDevice(devices[0].device_id);
-  }, [devices, device]);
+    if (sortedEcsus.length > 0 && selectedEcsuId == null) {
+      setSelectedEcsuId(sortedEcsus[0].ecsu_id);
+    }
+  }, [sortedEcsus, selectedEcsuId]);
 
-  const isAem = (device ?? '').startsWith('aem_drb-');
-  const isCpm = (device ?? '').startsWith('cpm23-') || (device ?? '').startsWith('cpm12d-');
-  const hasCircuit = isAem || isCpm;
-  const effectiveViewMode = hasCircuit ? viewMode : 'device';
-
-  // mappings
-  const energyMapping = useMemo(
-    () => inferEnergyMapping(device, effectiveViewMode === 'circuit' ? circuitId : undefined, phaseMode),
-    [device, effectiveViewMode, circuitId, phaseMode],
-  );
-  const energyParamCodes = useMemo(() => mappingToParameterCodes(energyMapping), [energyMapping]);
-  const demandMapping = useMemo(
-    () => inferDemandMapping(device, effectiveViewMode === 'circuit' ? circuitId : undefined),
-    [device, effectiveViewMode, circuitId],
-  );
-  const demandParamCodes = useMemo(() => demandMappingToCodes(demandMapping), [demandMapping]);
-
-  // fetch
+  // fetch（ecsu_id 路徑；backend force group_by=ecsu + mapping layer per-binding）
   const energyFilter = useMemo(() => {
-    if (!device || !queriedRange || energyParamCodes.length === 0) return null;
+    if (!selectedEcsuId || !queriedRange) return null;
     return {
-      granularity, parameter_codes: energyParamCodes, device_ids: [device],
-      from_ts: queriedRange[0].toISOString(), to_ts: queriedRange[1].toISOString(),
+      granularity,
+      parameter_codes: ECSU_PARAM_SUPERSET,
+      ecsu_id: selectedEcsuId,
+      from_ts: queriedRange[0].toISOString(),
+      to_ts: queriedRange[1].toISOString(),
     };
-  }, [device, queriedRange, energyParamCodes, granularity]);
+  }, [selectedEcsuId, queriedRange, granularity]);
   const { data: energyData, isLoading: energyLoading } = useEnergyReport(energyFilter);
 
-  const demandFilter = useMemo(() => {
-    if (!device || !queriedRange || demandParamCodes.length === 0) return null;
-    return {
-      granularity, parameter_codes: demandParamCodes, device_ids: [device],
-      from_ts: queriedRange[0].toISOString(), to_ts: queriedRange[1].toISOString(),
-    };
-  }, [device, queriedRange, demandParamCodes, granularity]);
-  const { data: demandData, isLoading: demandLoading } = useEnergyReport(demandFilter);
-
-  // chart data prep — power_total trend (用電趨勢)
+  // chart data prep — power_total trend（聚合 ECSU 所有 power 變體 SUM 後對齊 ts）
   const powerChartData = useMemo(() => {
-    if (!energyData?.points?.length || !energyMapping.power_total) return [] as { ts: string; power: number | null }[];
-    const map = new Map<string, number | null>();
+    if (!energyData?.points?.length) return [] as { ts: string; power: number | null }[];
+    const map = new Map<string, number>();
     energyData.points.forEach((p) => {
-      if (p.parameter_code === energyMapping.power_total) {
-        map.set(p.ts, p.avg_value ?? p.last_value ?? null);
+      if (POWER_PARAM_SET.has(p.parameter_code)) {
+        const v = p.avg_value ?? p.last_value ?? null;
+        if (v == null) return;
+        map.set(p.ts, (map.get(p.ts) ?? 0) + v);
       }
     });
     return Array.from(map.entries())
@@ -158,27 +121,7 @@ export default function Trends() {
         ts: dayjs(ts).format(granularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm'),
         power: v,
       }));
-  }, [energyData, energyMapping, granularity]);
-
-  // chart data prep — demand P/Q/S
-  const demandChartData = useMemo(() => {
-    if (!demandData?.points?.length) return [] as { ts: string; p?: number | null; q?: number | null; s?: number | null }[];
-    const byTs = new Map<string, { ts: string; p?: number | null; q?: number | null; s?: number | null }>();
-    demandData.points.forEach((p) => {
-      const entry = byTs.get(p.ts) ?? { ts: p.ts };
-      const v = p.avg_value ?? p.last_value ?? null;
-      if (p.parameter_code === demandMapping.p) entry.p = v;
-      if (p.parameter_code === demandMapping.q) entry.q = v;
-      if (p.parameter_code === demandMapping.s) entry.s = v;
-      byTs.set(p.ts, entry);
-    });
-    return Array.from(byTs.values())
-      .sort((a, b) => a.ts.localeCompare(b.ts))
-      .map((e) => ({
-        ts: dayjs(e.ts).format(granularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm'),
-        p: e.p, q: e.q, s: e.s,
-      }));
-  }, [demandData, demandMapping, granularity]);
+  }, [energyData, granularity]);
 
   const granularityOptions = useMemo(
     () => [
@@ -188,33 +131,7 @@ export default function Trends() {
     [],
   );
 
-  // AEM 40 + CPM 4 circuit options（純代號；M-PM-200 落地）
-  const circuitOptions = useMemo(() => {
-    if (isAem) {
-      const opts: { value: string; label: string }[] = [];
-      opts.push({ value: 'ma', label: 'ma' });
-      for (let n = 1; n <= 3; n++) opts.push({ value: `ma${n}`, label: `ma${n}` });
-      ['ba1_3', 'ba4_6', 'ba7_9', 'ba10_12'].forEach((g) => opts.push({ value: g, label: g.replace('_', '-') }));
-      for (let i = 1; i <= 12; i++) opts.push({ value: `ba${i}`, label: `ba${i}` });
-      opts.push({ value: 'mb', label: 'mb' });
-      for (let n = 1; n <= 3; n++) opts.push({ value: `mb${n}`, label: `mb${n}` });
-      ['bb1_3', 'bb4_6', 'bb7_9', 'bb10_12'].forEach((g) => opts.push({ value: g, label: g.replace('_', '-') }));
-      for (let i = 1; i <= 12; i++) opts.push({ value: `bb${i}`, label: `bb${i}` });
-      return opts;
-    }
-    if (isCpm) {
-      return [
-        { value: 'main', label: 'main' },
-        { value: 'l1', label: 'L1' },
-        { value: 'l2', label: 'L2' },
-        { value: 'l3', label: 'L3' },
-      ];
-    }
-    return [];
-  }, [isAem, isCpm]);
-
-  const hasPowerMetric = !!energyMapping.power_total;
-  const hasDemandMetric = demandParamCodes.length > 0;
+  const selectedEcsu = sortedEcsus.find((e) => e.ecsu_id === selectedEcsuId);
 
   return (
     <div>
@@ -225,39 +142,16 @@ export default function Trends() {
           value={range}
           onChange={(v) => v && v[0] && v[1] && setRange([v[0], v[1]])}
         />
-        {/* M-PM-205: Edge filter（對齊報表頁 pattern；老王 5/9 16:50 chat）*/}
+        {/* M-PM-253 §二: ECSU 下拉取代既有 Edge filter / device / 1PH/3PH / 視角 / circuit 5 selectors */}
         <Select
-          style={{ minWidth: 180 }}
-          value={edgeFilter}
-          onChange={(v) => {
-            setEdgeFilter(v);
-            // 切 Edge 時 reset device / circuit / view
-            setDevice(undefined);
-            setCircuitId(undefined);
-            setViewMode('device');
-          }}
-          options={edgeOptions}
+          style={{ minWidth: 320 }}
+          placeholder="選擇 ECSU（KW- · 區域 · 名稱）"
+          value={selectedEcsuId}
+          onChange={(v) => setSelectedEcsuId(v)}
+          options={ecsuSelectOptions}
           showSearch
-          optionFilterProp="value"
-          placeholder="所屬 Edge"
-        />
-        <Select
-          style={{ minWidth: 220 }}
-          placeholder={devicesLoading ? '載入設備中…' : '選擇設備'}
-          value={device}
-          onChange={(v) => {
-            setDevice(v);
-            setCircuitId(undefined);
-            const newIsAem = (v ?? '').startsWith('aem_drb-');
-            const newIsCpm = (v ?? '').startsWith('cpm23-') || (v ?? '').startsWith('cpm12d-');
-            if (!newIsAem && !newIsCpm) setViewMode('device');
-          }}
-          options={devices.map((d) => ({
-            value: d.device_id,
-            label: `${d.device_id}${d.display_name ? ' · ' + d.display_name : ''}`,
-          }))}
-          notFoundContent={devicesLoading ? <Spin size="small" /> : '無電表設備'}
-          disabled={devicesLoading}
+          optionFilterProp="label"
+          notFoundContent={ecsuListData == null ? <Spin size="small" /> : '無 ECSU'}
         />
         <Select
           key={`trends-gran-${granularity}`}
@@ -266,140 +160,66 @@ export default function Trends() {
           onChange={setGranularity}
           options={granularityOptions}
         />
-        <Radio.Group
-          value={phaseMode}
-          onChange={(e) => setPhaseMode(e.target.value)}
-          optionType="button"
-          buttonStyle="solid"
-          options={[
-            { value: '1ph', label: '1PH' },
-            { value: '3ph', label: '3PH' },
-          ]}
-        />
-        <Radio.Group
-          value={effectiveViewMode}
-          onChange={(e) => setViewMode(e.target.value)}
-          optionType="button"
-          buttonStyle="solid"
-          disabled={!hasCircuit}
-          options={[
-            { value: 'device', label: '依設備' },
-            { value: 'circuit', label: '依迴路' },
-          ]}
-        />
-        {hasCircuit && effectiveViewMode === 'circuit' && (
-          <Select
-            style={{ width: 220 }}
-            placeholder="選擇迴路"
-            value={circuitId}
-            onChange={setCircuitId}
-            options={circuitOptions}
-            allowClear
-            showSearch
-            optionFilterProp="label"
-          />
-        )}
         <Button
           type="primary"
           icon={<ReloadOutlined />}
           onClick={() => setQueriedRange([range[0], range[1]])}
-          loading={energyLoading || demandLoading}
-          disabled={!device || (hasCircuit && effectiveViewMode === 'circuit' && !circuitId)}
+          loading={energyLoading}
+          disabled={!selectedEcsuId}
         >
           查詢
         </Button>
       </Space>
 
-      {/* 用電趨勢（總功率 power_total 隨時間）*/}
-      <Card
-        title="用電趨勢"
-        size="small"
+      <Alert
+        type="info"
+        showIcon
         style={{ marginBottom: 16 }}
-        extra={
-          hasPowerMetric ? (
-            <Text type="secondary" style={{ fontSize: 11 }}>{energyMapping.power_total}</Text>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 11 }}>本視角無 power metric</Text>
-          )
+        message="趨勢圖以 ECSU 用電計費單位聚合顯示"
+        description={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            M-PM-253 §二（老王 5/21 拍板）：選 ECSU → backend 自動聚合該 ECSU 綁定的所有迴路（含 sign 反向潮流計算）。
+            {selectedEcsu && (
+              <>
+                <br />
+                目前選擇：<Text code>{selectedEcsu.ecsu_code}</Text> · 區域 <Text code>{selectedEcsu.region ?? '—'}</Text> ·{' '}
+                <Text>{selectedEcsu.ecsu_name}</Text>
+              </>
+            )}
+          </Text>
         }
-      >
-        {!queriedRange ? (
-          <Empty description="請按「查詢」載入資料" />
-        ) : !hasPowerMetric ? (
-          <Empty description="本視角無 power metric" />
-        ) : energyLoading ? (
+      />
+
+      <Card title="用電趨勢（總功率 W；ECSU 聚合）" size="small" style={{ marginBottom: 16 }}>
+        {energyLoading ? (
           <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
         ) : powerChartData.length === 0 ? (
-          <Empty description="時段內無資料" />
+          <Empty description={queriedRange ? '時段內無資料' : '請按「查詢」載入資料'} />
         ) : (
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={320}>
             <LineChart data={powerChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="ts" />
-              <YAxis label={{ value: 'W', angle: -90, position: 'insideLeft' }} />
-              <Tooltip formatter={(v) => [typeof v === 'number' ? v.toFixed(0) : '—', '總功率']} />
-              <Line type="monotone" dataKey="power" name="總功率 (W)" stroke="#4caf50" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </Card>
-
-      {/* 需量趨勢 Demand（reuse Reports 既有邏輯）*/}
-      <Card
-        title="需量趨勢 Demand"
-        size="small"
-        extra={
-          hasDemandMetric ? (
-            <Text type="secondary" style={{ fontSize: 11 }}>{demandParamCodes.join(' / ')}</Text>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 11 }}>本視角無 demand metric</Text>
-          )
-        }
-      >
-        {!queriedRange ? (
-          <Empty description="請按「查詢」載入資料" />
-        ) : !hasDemandMetric ? (
-          <Empty
-            description={
-              <Space direction="vertical" size={4}>
-                <span>本視角 driver 未落地獨立 demand metric</span>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  子迴路 / per-phase / 小群組目前無獨立 demand；可切「主迴路 ma/mb/main」
-                </Text>
-              </Space>
-            }
-          />
-        ) : demandLoading ? (
-          <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
-        ) : demandChartData.length === 0 ? (
-          <Empty description="時段內無 demand 資料" />
-        ) : (
-          <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={demandChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="ts" />
               <YAxis />
-              <Tooltip formatter={(v, name) => [typeof v === 'number' ? v.toFixed(1) : '—', name]} />
+              <Tooltip />
               <Legend />
-              {demandMapping.p && (
-                <Line type="monotone" dataKey="p" name="P (主動需量)" stroke="#4caf50" strokeWidth={2} dot={false} />
-              )}
-              {demandMapping.q && (
-                <Line type="monotone" dataKey="q" name="Q (無效需量)" stroke="#1976d2" strokeWidth={2} dot={false} />
-              )}
-              {demandMapping.s && (
-                <Line type="monotone" dataKey="s" name="S (視在需量)" stroke="#ff9800" strokeWidth={2} dot={false} />
-              )}
+              <Line type="monotone" dataKey="power" name="總功率 (W)" stroke="#1677ff" dot={false} strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
         )}
       </Card>
 
       <Alert
-        type="info"
+        type="warning"
         showIcon
-        style={{ marginTop: 16 }}
-        message="趨勢圖頁聚焦圖表分析；數據查詢、Excel 匯出、HistoryTable 列表請使用「報表」頁。"
+        style={{ marginTop: 8 }}
+        message="需量 (Demand P/Q/S) chart 暫不顯示"
+        description={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            backend ECSU mapping layer（M-P12-061 §3.2）對 demand metric 無 mapping coverage；
+            老王 5/21 拍板 1 對齊「Demand 不改」精神。
+          </Text>
+        }
       />
     </div>
   );

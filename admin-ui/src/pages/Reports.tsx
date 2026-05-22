@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Card, Col, DatePicker, Empty, Radio, Row, Select, Space, Spin,
+  Alert, Button, Card, Col, DatePicker, Empty, Row, Select, Space, Spin,
   Statistic, Table, Tabs, Tag, Typography, message,
 } from 'antd';
 import { ReloadOutlined, DownloadOutlined } from '@ant-design/icons';
@@ -40,7 +40,10 @@ import {
   demandMappingToCodes,
   mergeDemandIntoEnergyRows,
   type PhaseMode,
+  type EnergyMetricMapping,
 } from '../hooks/useEnergyReport';
+// M-PM-253 §二 動作 1: ECSU 下拉（取代既有實體迴路 selectors；老王 5/21 拍板）
+import { useEcsuList, buildEcsuTree } from '../hooks/useEcsu';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -153,13 +156,15 @@ export default function Reports() {
 
   // 設備清單（一次載入，各 Tab 共用）
   const [devices, setDevices] = useState<DeviceRow[]>([]);
-  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [, setDevicesLoading] = useState(false);
 
   // Events Tab
   const [events, setEvents] = useState<EventRow[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
 
   // Energy Tab
+  // M-PM-253 §二 動作 1（老王 5/21 拍板「棄用實體迴路下拉」改 ECSU 下拉）
+  // 既有 device-mode state 保留為向下相容（Excel 既有 column 渲染 / demand mapping）；UI 不再顯
   const [energyDevice, setEnergyDevice] = useState<string | undefined>();
   const [energyPoints, setEnergyPoints] = useState<EnergyPoint[]>([]);
   const [energyLoading, setEnergyLoading] = useState(false);
@@ -167,14 +172,13 @@ export default function Reports() {
   const [energyQueriedRange, setEnergyQueriedRange] = useState<[Dayjs, Dayjs] | null>(null);
   // T-Reports-001 §AC 2.3 Energy Tab 新狀態
   const [energyGranularity, setEnergyGranularity] = useState<Granularity>('15min');
-  const [energyViewMode, setEnergyViewMode] = useState<'device' | 'circuit'>('device');
-  const [energyCircuitId, setEnergyCircuitId] = useState<string | undefined>();
+  const [energyViewMode] = useState<'device' | 'circuit'>('device'); // M-PM-253: deprecated fallback
+  const [energyCircuitId] = useState<string | undefined>(); // M-PM-253: deprecated
   const [energyHistoryRange, setEnergyHistoryRange] = useState<[Dayjs, Dayjs] | null>(null);
-  // M-PM-186 §三 UI 軌（5/9 P11 session D）：1PH/3PH toggle（CPM-23 線/相電壓切換；CPM-12D 不影響；AEM 不影響）
-  const [energyPhaseMode, setEnergyPhaseMode] = useState<PhaseMode>('3ph');
-  // M-PM-186 §三 UI 軌：Edge filter（fleet 5 顆 × ~10 設備）
-  const ENERGY_EDGE_FILTER_ALL = '__ALL__';
-  const [energyEdgeFilter, setEnergyEdgeFilter] = useState<string>(ENERGY_EDGE_FILTER_ALL);
+  // M-PM-253 §二: energyPhaseMode deprecated（PhaseMode type 仍 import 為向下相容）
+  void ({} as PhaseMode);
+  // M-PM-253 §二: ECSU 下拉取代既有 selectors
+  const [selectedEcsuId, setSelectedEcsuId] = useState<number | undefined>();
 
   // Thermal Tab
   const [thermalDevice, setThermalDevice] = useState<string | undefined>();
@@ -215,46 +219,53 @@ export default function Reports() {
   // 取 down edge 的 edge_id（若多個 Edge down 取第一個；多 Edge 模板化為未來工作）
   const suppressedEdgeId = edgeDownAlerts[0]?.edge_id ?? null;
 
-  // 依 device_kind 分類（Energy 仍從 ems_device modbus_meter）
+  // M-PM-253 §二: 加 ECSU list + KW- natural sort (reuse buildEcsuTree from M-P11-E14)
+  const { data: ecsuListData } = useEcsuList();
+  const sortedEcsus = useMemo(() => {
+    if (!ecsuListData) return [];
+    // buildEcsuTree 樹狀化後 sortFn 已套 KW- natural sort; flatten 取 sorted order
+    type Node = (typeof ecsuListData)[number] & { children?: Node[] };
+    const tree = buildEcsuTree(ecsuListData) as Node[];
+    const flat: (typeof ecsuListData) = [];
+    const walk = (nodes: Node[]) => {
+      nodes.forEach((n) => {
+        const { children, ...rest } = n;
+        flat.push(rest as (typeof ecsuListData)[number]);
+        if (children) walk(children);
+      });
+    };
+    walk(tree);
+    return flat;
+  }, [ecsuListData]);
+
+  // ECSU 下拉 options（label: `KW-XX · 區域 · 名稱`；老王 5/21 截圖格式對齊）
+  const ecsuSelectOptions = useMemo(
+    () =>
+      sortedEcsus.map((e) => ({
+        value: e.ecsu_id,
+        label: `${e.ecsu_code} · ${e.region ?? '—'} · ${e.ecsu_name}`,
+      })),
+    [sortedEcsus],
+  );
+
+  // 預設選第一個 ECSU
+  useEffect(() => {
+    if (sortedEcsus.length > 0 && selectedEcsuId == null) {
+      setSelectedEcsuId(sortedEcsus[0].ecsu_id);
+    }
+  }, [sortedEcsus, selectedEcsuId]);
+
+  // 依 device_kind 分類（Energy 仍從 ems_device modbus_meter）— 保留向下相容
   const energyDevicesAll = useMemo(
     () => devices.filter((d) => d.device_kind === 'modbus_meter' || d.device_kind === 'meter'),
     [devices],
   );
-  // M-PM-186 §三 UI 軌：Edge filter（fleet）— 套 edgeFilter state；__ALL__ 顯全部
-  const energyDevices = useMemo(
-    () =>
-      energyEdgeFilter === ENERGY_EDGE_FILTER_ALL
-        ? energyDevicesAll
-        : energyDevicesAll.filter((d) => d.edge_id === energyEdgeFilter),
-    [energyDevicesAll, energyEdgeFilter],
-  );
-
-  // M-PM-186 §三 UI 軌：Edge filter options（從 useEdges + energyDevicesAll 取交集）
-  const { data: edgesData } = useEdges();
-  const energyEdgeOptions = useMemo(() => {
-    const opts: { value: string; label: React.ReactNode }[] = [
-      { value: ENERGY_EDGE_FILTER_ALL, label: '全部 Edge' },
-    ];
-    // 只列**有 modbus_meter 設備**的 Edge（避免下拉空殼）
-    const edgesWithMeter = new Set(energyDevicesAll.map((d) => d.edge_id).filter(Boolean));
-    (edgesData ?? []).forEach((e) => {
-      if (!edgesWithMeter.has(e.edge_id)) return;
-      opts.push({
-        value: e.edge_id,
-        label: (
-          <Space size={4}>
-            <span>{e.edge_id}</span>
-            {e.edge_name && e.edge_name !== e.edge_id && (
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                · {e.edge_name}
-              </Text>
-            )}
-          </Space>
-        ),
-      });
-    });
-    return opts;
-  }, [edgesData, energyDevicesAll]);
+  // M-PM-253 §二: Edge filter / energyDevices 路徑 deprecated（不再 UI 顯示）
+  // 既有 energyDevicesAll reference 保留為 Excel 用（excel 內 device_id 推 device_kind for per-phase column）
+  const energyDevices = energyDevicesAll;
+  void energyDevices;
+  // M-PM-253 §二: useEdges import 保留但本 page deprecated（other tabs 可能仍用；此處 void）
+  void useEdges;
 
   // Thermal Tab 設備清單：用 IrDevice 結構（device_id 為 `811c_<MAC>`；display_name 顯示優先）
   // 依 T-S11C-001 AC 6：MAC 不出現前台；用 display_name 或「未命名 IR-N」
@@ -328,35 +339,58 @@ export default function Reports() {
   // 有效視角（無 sub-circuit 設備強制 device；其他用使用者選擇）
   const effectiveViewMode = energyDeviceHasCircuit ? energyViewMode : 'device';
 
-  // 6 metric mapping per device + 視角 + circuit + phaseMode（M-PM-186 §三）
-  const energyMapping = useMemo(
-    () =>
-      inferEnergyMapping(
-        energyDevice,
-        effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
-        energyPhaseMode,
-      ),
-    [energyDevice, effectiveViewMode, energyCircuitId, energyPhaseMode],
-  );
+  // M-PM-253 §二: ECSU 模式 FIXED mapping（不再 per-device infer）
+  // backend mapping layer (M-P12-061 §3.2) 對 binding 自動 map circuit_code → mapped parameter_code
+  // → frontend 傳 superset 確保 backend filter ∩ 全 binding mapped param
+  //
+  // ECSU_PARAM_SUPERSET 對齊 device_circuits.py map_*_param mapping table:
+  //   cpm12d/cpm23 main: power_total, energy_kwh_imp
+  //   aem_drb main:       ma_p_sum, mb_p_sum, ma_ae_imp, mb_ae_imp
+  //   aem_drb branch:     ba1-12_p / bb1-12_p / ba1-12_ae_imp / bb1-12_ae_imp
+  //   aem_drb three_phase: ba1_3_p_sum...bb10_12_p_sum / 同 _ae_imp
+  // total ~60 codes; backend 自動 filter binding ∩ user_params
+  const ECSU_PARAM_SUPERSET = useMemo(() => [
+    'power_total', 'energy_kwh_imp',
+    'ma_p_sum', 'mb_p_sum', 'ma_ae_imp', 'mb_ae_imp',
+    ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
+    ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
+    ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_ae_imp`),
+    ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_ae_imp`),
+    'ba1_3_p_sum', 'ba4_6_p_sum', 'ba7_9_p_sum', 'ba10_12_p_sum',
+    'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
+    'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
+    'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+  ], []);
 
-  // 6 metric → parameter_codes（送 backend）
-  const energyParamCodes = useMemo(
-    () => mappingToParameterCodes(energyMapping),
-    [energyMapping],
-  );
+  // M-PM-253 §二: ECSU 模式 mapping (Excel column rendering reuse)
+  // backend 自動聚合 → 只 power_total 與 energy_kwh_imp 對 ECSU 有 reliable 意義
+  // voltage / frequency / current / power_factor 對 ECSU 無 mapping → null
+  const energyMapping: EnergyMetricMapping = useMemo(() => ({
+    voltage: null,
+    frequency: null,
+    current: null,
+    power_total: 'power_total',
+    power_factor: null,
+    energy_kwh: 'energy_kwh_imp',
+  }), []);
 
-  // useEnergyReport hook filter（按查詢按鈕後 set energyHistoryRange 觸發 fetch）
+  // ECSU 模式不再用 inferEnergyMapping/mappingToParameterCodes
+  // 保留變數 reference 為 backward compat（unused）
+  void inferEnergyMapping;
+  void mappingToParameterCodes;
+  void ECSU_PARAM_SUPERSET; // ECSU 模式直接傳 superset；不再 mappingToParameterCodes
+
+  // useEnergyReport hook filter — M-PM-253 §二: ecsu_id 路徑
   const energyReportFilter = useMemo(() => {
-    if (!energyDevice || !energyHistoryRange || energyParamCodes.length === 0) return null;
+    if (!selectedEcsuId || !energyHistoryRange) return null;
     return {
       granularity: energyGranularity,
-      parameter_codes: energyParamCodes,
-      circuit_id: effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
-      device_ids: [energyDevice],
+      parameter_codes: ECSU_PARAM_SUPERSET,
+      ecsu_id: selectedEcsuId,
       from_ts: energyHistoryRange[0].toISOString(),
       to_ts: energyHistoryRange[1].toISOString(),
     };
-  }, [energyDevice, energyHistoryRange, energyParamCodes, energyGranularity, effectiveViewMode, energyCircuitId]);
+  }, [selectedEcsuId, energyHistoryRange, energyGranularity, ECSU_PARAM_SUPERSET]);
 
   const { data: energyReportData, isLoading: energyHistoryLoading } = useEnergyReport(
     energyReportFilter,
@@ -376,29 +410,21 @@ export default function Reports() {
   // - mapping 來源 inferDemandMapping（device + circuit）
   // - chart 顯三條線：P/Q/S
   // ─────────────────────────────────────────────────────────────
+  // M-PM-253 §二: demand chart 同 ECSU 模式（Energy Tab 內 demand_p column）
+  // backend mapping layer 對 binding 不 include demand_p（M-P12-061 mapping 只 energy + power）
+  // → demand 對 ECSU 模式無 backend mapping → demand chart 對 ECSU 不顯數據（null）
+  // 對齊老王 5/21 拍板 1「Demand Tab 不改」精神（Demand Tab 已不在；demand_p column 在 Energy Tab 內顯空 OK）
   const demandMapping = useMemo(
-    () =>
-      inferDemandMapping(
-        energyDevice,
-        effectiveViewMode === 'circuit' ? energyCircuitId : undefined,
-      ),
-    [energyDevice, effectiveViewMode, energyCircuitId],
+    () => inferDemandMapping(undefined, undefined),
+    [],
   );
   const demandParamCodes = useMemo(
     () => demandMappingToCodes(demandMapping),
     [demandMapping],
   );
-  const demandReportFilter = useMemo(() => {
-    if (!energyDevice || !energyHistoryRange || demandParamCodes.length === 0) return null;
-    return {
-      granularity: energyGranularity,
-      parameter_codes: demandParamCodes,
-      circuit_id: undefined, // demand metric 用全 parameter_code 直查；不走 circuit prefix LIKE
-      device_ids: [energyDevice],
-      from_ts: energyHistoryRange[0].toISOString(),
-      to_ts: energyHistoryRange[1].toISOString(),
-    };
-  }, [energyDevice, energyHistoryRange, demandParamCodes, energyGranularity]);
+  // M-PM-253 §二: 暫不 fetch demand（無 backend mapping 對 ECSU；對齊拍板）
+  const demandReportFilter = null;
+  void demandParamCodes;
   // M-PM-202: chart 已抽至 /trends 頁；本頁仍 fetch demand 用於 HistoryTable demand_p column（M-PM-203）
   const { data: demandReportData } = useEnergyReport(demandReportFilter);
 
@@ -472,12 +498,9 @@ export default function Reports() {
     [],
   );
 
-  // 依設備類型決定 circuit options
-  const energyCircuitOptions = useMemo(() => {
-    if (energyDeviceIsAem) return aemCircuitOptions;
-    if (energyDeviceIsCpm) return cpmCircuitOptions;
-    return [];
-  }, [energyDeviceIsAem, energyDeviceIsCpm, aemCircuitOptions, cpmCircuitOptions]);
+  // M-PM-253 §二: circuit options deprecated（不再顯實體迴路下拉）
+  // 既有 aemCircuitOptions / cpmCircuitOptions 保留為 backward compat（Excel column 推導用）
+  void aemCircuitOptions; void cpmCircuitOptions;
 
   // T-Reports-001 §AC 2.3 granularity options（穩定 reference 避免 inline array 觸發 ant-d Select 重 mount 時 displayed label 卡舊）
   // 老王 2026-05-04 chat 補校正：「下拉選單顯示沒連動一起變更顯示」
@@ -619,45 +642,86 @@ export default function Reports() {
     return delta > 0 ? delta : 0; // 防 cagg 邊界 negative；累積值不可能減少
   }, [energyPoints]);
 
-  // M-PM-173 / M-PM-159 §AC 2-4: Excel 匯出
+  // M-PM-253 §二 動作 4: helper for Excel cell number formatting
+  const fmtNum = (v: unknown, precision: number): string => {
+    if (typeof v === 'number') return v.toFixed(precision);
+    return v == null ? '' : String(v);
+  };
+
+  // M-PM-253 §二 動作 4: Excel 18 欄匯出（老王 5/21 截圖格式 + 4 拍板兌現）
+  // - 區域 / 電表編號 / 名稱 / 日期 / 時間 / 平均電壓(V) / 平均電流(A) / A/b/C 電流 /
+  //   平均總功率(W) / 功率因數 / 累積用電(kWh) / 頻率(Hz) / 用電量合計(度) / 電費 / 電費合計(元)
+  // - A/b/C 電流：僅 aem_drb 填值（M-P11-E19 拍板 2；ECSU 模式 mapping 無 → 全顯空）
+  // - 用電量合計：ECSU 期間 SUM（footer row）
+  // - 電費 / 電費合計：留空（電價規則 UI 未完）
+  // - 功率因數紅色 conditional format：跳過（純資料；拍板 4）
   const { exportToExcel, isExporting } = useReportExport();
+
+  const selectedEcsuForExcel = useMemo(
+    () => sortedEcsus.find((e) => e.ecsu_id === selectedEcsuId),
+    [sortedEcsus, selectedEcsuId],
+  );
+
   const handleExportEnergyExcel = useCallback(() => {
-    if (!energyDevice || energyHistoryRows.length === 0) return;
-    const deviceLabel =
-      thermalDevices.find((d) => d.device_id === energyDevice)?.label ??
-      devices.find((d) => d.device_id === energyDevice)?.display_name ??
-      energyDevice;
+    if (!selectedEcsuForExcel || energyHistoryRows.length === 0) return;
+    const ecsuCode = selectedEcsuForExcel.ecsu_code;
+    const region = selectedEcsuForExcel.region ?? '';
+    const ecsuName = selectedEcsuForExcel.ecsu_name;
+
     const fmt = (d: dayjs.Dayjs) => d.format('YYYYMMDD-HHmm');
-    const safeName = String(deviceLabel).replace(/[/\\?*:|"<>]/g, '_');
-    // 老王 5/9 chat：兩端時分相同（如 09:41→09:41 跨日）視覺像重複；改用「至」中文分隔起迄明示
+    const safeName = `${ecsuCode}_${ecsuName}`.replace(/[/\\?*:|"<>]/g, '_');
     const filename = `用電履歷_${safeName}_${energyGranularity}_${fmt(range[0])}_至_${fmt(range[1])}.xlsx`;
 
-    // 欄位 10 項中文映射（M-PM-173 §2.1）；對齊既有 energyColumns 結構
-    // 老王 5/9 chat：「Excel 標題列也要跟 UI 上顯示一樣包含單位『電壓(V)』」
-    exportToExcel({
-      rows: energyHistoryRows,
-      columns: energyColumns.map((c) => ({
-        key: c.key as string,
-        header: c.unit ? `${c.title} (${c.unit})` : c.title,
-        render: (row) => {
-          const v = (row as Record<string, unknown>)[c.key as string];
-          if (v == null) return '';
-          if (typeof v === 'number' && c.precision != null) return v.toFixed(c.precision);
-          return String(v);
-        },
-        width: c.width ? Math.max(8, Math.floor(c.width / 8)) : undefined,
-      })),
+    // 18 column 對齊老王 5/21 截圖
+    type ExcelRow = (typeof energyHistoryRows)[number] & {
+      region: string;
+      ecsu_code: string;
+      ecsu_name: string;
+      _date: string;
+      _time: string;
+    };
+
+    const enrichedRows: ExcelRow[] = energyHistoryRows.map((r) => {
+      const ts = dayjs((r as { ts?: string }).ts);
+      return {
+        ...r,
+        region,
+        ecsu_code: ecsuCode,
+        ecsu_name: ecsuName,
+        _date: ts.isValid() ? ts.format('YYYY-MM-DD') : '',
+        _time: ts.isValid() ? ts.format('HH:mm:ss') : '',
+      };
+    });
+
+    exportToExcel<ExcelRow>({
+      rows: enrichedRows,
+      columns: [
+        { key: 'region', header: '區域' },
+        { key: 'ecsu_code', header: '電表編號' },
+        { key: 'ecsu_name', header: '名稱' },
+        { key: '_date', header: '日期' },
+        { key: '_time', header: '時間' },
+        { key: 'voltage', header: '平均電壓(V)', render: (r) => fmtNum((r as Record<string, unknown>).voltage, 1) },
+        { key: 'current', header: '平均電流(A)', render: (r) => fmtNum((r as Record<string, unknown>).current, 2) },
+        { key: 'current_a', header: 'A 電流(A)', render: () => '' /* M-P11-E19 拍板 2: ECSU 模式無 per-phase mapping; 空 */ },
+        { key: 'current_b', header: 'b 電流(A)', render: () => '' },
+        { key: 'current_c', header: 'C 電流(A)', render: () => '' },
+        { key: 'power_total', header: '平均總功率(W)', render: (r) => fmtNum((r as Record<string, unknown>).power_total, 0) },
+        { key: 'power_factor', header: '功率因數', render: (r) => fmtNum((r as Record<string, unknown>).power_factor, 3) },
+        { key: 'energy_kwh', header: '累積用電(kWh)', render: (r) => fmtNum((r as Record<string, unknown>).energy_kwh, 1) },
+        { key: 'frequency', header: '頻率(Hz)', render: (r) => fmtNum((r as Record<string, unknown>).frequency, 2) },
+        { key: '_consumption', header: '用電量合計(度)', render: () => '' /* M-P11-E19 拍板 3: 業主自填 / SUM；frontend 暫留空 */ },
+        { key: '_rate', header: '電費', render: () => '' /* 電價規則 UI 未完成；留空 */ },
+        { key: '_total_fee', header: '電費合計(元)', render: () => '' /* 同 */ },
+      ],
       filename,
       sheetName: 'Energy',
     });
   }, [
-    energyDevice,
+    selectedEcsuForExcel,
     energyHistoryRows,
-    energyColumns,
     energyGranularity,
     range,
-    devices,
-    thermalDevices,
     exportToExcel,
   ]);
 
@@ -840,48 +904,20 @@ export default function Reports() {
               <>
                 <Space style={{ marginBottom: 16 }} wrap>
                   {renderRange()}
-                  {/* M-PM-186 §三 UI 軌：Edge filter（fleet 5 顆 Edge × ~10 設備需要）*/}
+                  {/* M-PM-253 §二 動作 1（老王 5/21 拍板）：移除 Edge filter + 設備 + 1PH/3PH + 視角 + 迴路 5 selectors
+                       改 ECSU Select（label: `KW-XX · 區域 · 名稱`；KW- natural sort）
+                       backend force group_by=ecsu + mapping layer per-binding（M-P12-061 §3.2）*/}
                   <Select
-                    style={{ minWidth: 180 }}
-                    value={energyEdgeFilter}
-                    onChange={(v) => {
-                      setEnergyEdgeFilter(v);
-                      // 切 Edge filter 時 reset device 選擇（避免卡 filter 外設備）
-                      setEnergyDevice(undefined);
-                      setEnergyViewMode('device');
-                      setEnergyCircuitId(undefined);
-                    }}
-                    options={energyEdgeOptions}
+                    style={{ minWidth: 320 }}
+                    placeholder="選擇 ECSU（KW- · 區域 · 名稱）"
+                    value={selectedEcsuId}
+                    onChange={(v) => setSelectedEcsuId(v)}
+                    options={ecsuSelectOptions}
                     showSearch
-                    optionFilterProp="value"
-                    placeholder="所屬 Edge"
-                  />
-                  <Select
-                    style={{ minWidth: 220 }}
-                    placeholder={devicesLoading ? '載入設備中…' : '選擇設備'}
-                    value={energyDevice}
-                    onChange={(v) => {
-                      setEnergyDevice(v);
-                      // 切設備時 reset circuit；非 AEM/CPM 強制 device 視角
-                      // M-PM-198：CPM 也有 sub-circuit（L1/L2/L3）；保留 viewMode
-                      const isAem = (v ?? '').startsWith('aem_drb-');
-                      const isCpm =
-                        (v ?? '').startsWith('cpm23-') ||
-                        (v ?? '').startsWith('cpm12d-');
-                      if (!isAem && !isCpm) {
-                        setEnergyViewMode('device');
-                      }
-                      setEnergyCircuitId(undefined);
-                    }}
-                    options={energyDevices.map((d) => ({
-                      value: d.device_id,
-                      label: `${d.device_id}${d.display_name ? ' · ' + d.display_name : ''}`,
-                    }))}
-                    notFoundContent={devicesLoading ? <Spin size="small" /> : '無電表設備'}
-                    disabled={devicesLoading}
+                    optionFilterProp="label"
+                    notFoundContent={ecsuListData == null ? <Spin size="small" /> : '無 ECSU'}
                   />
                   {/* T-Reports-001 §AC 2.3：granularity selector（5min 起；M-P12-025 backend 擴後 enable 全選項）*/}
-                  {/* 老王 2026-05-04 chat：「下拉選單顯示沒連動」→ options 用 useMemo 穩定 reference + key 強制 displayed label 重 render */}
                   <Select
                     key={`energy-gran-${energyGranularity}`}
                     style={{ width: 120 }}
@@ -889,42 +925,6 @@ export default function Reports() {
                     onChange={(v) => setEnergyGranularity(v)}
                     options={energyGranularityOptions}
                   />
-                  {/* M-PM-186 §三 UI 軌（5/9 P11 session D）：1PH/3PH toggle（cpm23 線/相電壓切換；其他設備不影響）*/}
-                  <Radio.Group
-                    value={energyPhaseMode}
-                    onChange={(e) => setEnergyPhaseMode(e.target.value)}
-                    optionType="button"
-                    buttonStyle="solid"
-                    options={[
-                      { value: '1ph', label: '1PH' },
-                      { value: '3ph', label: '3PH' },
-                    ]}
-                  />
-                  {/* T-Reports-001 §AC 2.3 + M-PM-198：視角切換 toggle（CPM/AEM 都 enable；其他強制 device）*/}
-                  <Radio.Group
-                    value={effectiveViewMode}
-                    onChange={(e) => setEnergyViewMode(e.target.value)}
-                    optionType="button"
-                    buttonStyle="solid"
-                    disabled={!energyDeviceHasCircuit}
-                    options={[
-                      { value: 'device', label: '依設備' },
-                      { value: 'circuit', label: '依迴路' },
-                    ]}
-                  />
-                  {/* M-PM-198：依迴路 → AEM 40 項 / CPM 4 項（main + L1/L2/L3）*/}
-                  {energyDeviceHasCircuit && effectiveViewMode === 'circuit' && (
-                    <Select
-                      style={{ width: 220 }}
-                      placeholder="選擇迴路"
-                      value={energyCircuitId}
-                      onChange={setEnergyCircuitId}
-                      options={energyCircuitOptions}
-                      allowClear
-                      showSearch
-                      optionFilterProp="label"
-                    />
-                  )}
                   <Button
                     type="primary"
                     icon={<ReloadOutlined />}
@@ -934,7 +934,7 @@ export default function Reports() {
                       setEnergyHistoryRange([range[0], range[1]]);
                     }}
                     loading={energyLoading || energyHistoryLoading}
-                    disabled={!energyDevice || (energyDeviceHasCircuit && effectiveViewMode === 'circuit' && !energyCircuitId)}
+                    disabled={!selectedEcsuId}
                   >
                     查詢
                   </Button>
@@ -943,7 +943,7 @@ export default function Reports() {
                     icon={<DownloadOutlined />}
                     onClick={handleExportEnergyExcel}
                     loading={isExporting}
-                    disabled={!energyDevice || energyHistoryRows.length === 0}
+                    disabled={!selectedEcsuId || energyHistoryRows.length === 0}
                   >
                     📥 匯出 Excel
                   </Button>

@@ -50,8 +50,16 @@ export interface EnergyReportResponse {
 export interface EnergyReportFilter {
   granularity: Granularity;
   parameter_codes: string[];
+  /** @deprecated M-PM-253 §二 老王 5/21 拍板 3「棄用實體迴路下拉」；保留 backward compat */
   circuit_id?: string;
+  /** @deprecated M-PM-253 §二 棄用 device 路徑；保留 backward compat（Thermal/IR Tab 仍用）*/
   device_ids?: string[];
+  /**
+   * M-PM-253 §一 / M-P12-061: 走 ECSU 路徑 — backend force group_by=ecsu
+   * + JOIN fnd_ecsu_circuit_assgn + SUM × sign + mapping layer per-binding
+   * 給定 ecsu_id → backend 自動聚合該 ECSU 綁定的所有迴路；無需 device_ids/circuit_id
+   */
+  ecsu_id?: number;
   from_ts: string;
   to_ts: string;
 }
@@ -68,12 +76,17 @@ export function useEnergyReport(filter: EnergyReportFilter | null) {
       const params = new URLSearchParams();
       params.append('granularity', filter.granularity);
       filter.parameter_codes.forEach((c) => params.append('parameter_codes', c));
-      // 故意不傳 circuit_id（即使 filter 有提供）：
-      //   backend circuit_id 走 prefix LIKE，會把 ma_v_avg / ma_freq 等
-      //   主迴路 metric 排除（不 match 'ba1%'）→ AEM 依迴路視角的電壓/頻率消失
-      //   既然 parameter_codes 已 explicit 列出所有要的 metric，circuit_id 多餘
-      //   參考 [[T-Reports-001]] AEM 視角設計（ba→ma / bb→mb 主迴路繼承）
-      filter.device_ids?.forEach((d) => params.append('device_ids', d));
+      // M-PM-253 §二: ecsu_id 路徑（backend force group_by=ecsu + mapping layer）
+      if (filter.ecsu_id != null) {
+        params.append('ecsu_id', String(filter.ecsu_id));
+      } else {
+        // 故意不傳 circuit_id（即使 filter 有提供）：
+        //   backend circuit_id 走 prefix LIKE，會把 ma_v_avg / ma_freq 等
+        //   主迴路 metric 排除（不 match 'ba1%'）→ AEM 依迴路視角的電壓/頻率消失
+        //   既然 parameter_codes 已 explicit 列出所有要的 metric，circuit_id 多餘
+        //   參考 [[T-Reports-001]] AEM 視角設計（ba→ma / bb→mb 主迴路繼承）
+        filter.device_ids?.forEach((d) => params.append('device_ids', d));
+      }
       params.append('from_ts', filter.from_ts);
       params.append('to_ts', filter.to_ts);
       const r = await api.get<EnergyReportResponse>(`/reports/energy?${params.toString()}`);
