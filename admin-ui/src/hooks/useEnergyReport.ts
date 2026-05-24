@@ -110,13 +110,20 @@ export type EnergyMetricKey =
   | 'energy_kwh';
 
 export interface EnergyMetricMapping {
-  /** key=老王指定 6 項；value=後端 parameter_code（null 表示該 device/視角無對應 metric）*/
-  voltage: string | null;
-  frequency: string | null;
-  current: string | null;
-  power_total: string | null;
-  power_factor: string | null;
-  energy_kwh: string | null;
+  /**
+   * key=老王指定 6 項；value=後端 parameter_code
+   *   - string：device 模式（既有；單一 parameter_code）
+   *   - string[]：M-PM-264 §三 ECSU 模式（多 parameter_code 同 metric；e.g. voltage 對應
+   *     cpm23 `voltage_ll_avg` / cpm12d `voltage_avg` / aem main `{ma|mb}_v_avg`；
+   *     backend M-P12-065 已跨 binding AVG，frontend 接到任一 code 即填入該 metric key）
+   *   - null：該 device/視角無對應 metric
+   */
+  voltage: string | string[] | null;
+  frequency: string | string[] | null;
+  current: string | string[] | null;
+  power_total: string | string[] | null;
+  power_factor: string | string[] | null;
+  energy_kwh: string | string[] | null;
 }
 
 /** 1PH / 3PH 視角（M-PM-186 §三 UI 軌新加；T-AdminUI-006 P11 session D）
@@ -290,9 +297,17 @@ export function inferEnergyMapping(
   };
 }
 
-/** 取 mapping 中所有 non-null parameter_code（用於 fetch parameter_codes 參數）*/
+/** 取 mapping 中所有 non-null parameter_code（用於 fetch parameter_codes 參數）
+ *  M-PM-264 §三：支援 string | string[] | null
+ */
 export function mappingToParameterCodes(mapping: EnergyMetricMapping): string[] {
-  return Object.values(mapping).filter((v): v is string => !!v);
+  const out: string[] = [];
+  Object.values(mapping).forEach((v) => {
+    if (v == null) return;
+    if (Array.isArray(v)) out.push(...v);
+    else out.push(v);
+  });
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -304,12 +319,12 @@ export function mappingToParameterCodes(mapping: EnergyMetricMapping): string[] 
 // ─────────────────────────────────────────────────────────────
 
 export interface DemandMetricMapping {
-  /** 主動需量（kW；P）*/
-  p: string | null;
+  /** 主動需量（kW；P）M-PM-264 §三：支援 string[] for ECSU 多 device_kind */
+  p: string | string[] | null;
   /** 無效需量（kvar；Q）*/
-  q: string | null;
+  q: string | string[] | null;
   /** 視在需量（kVA；S）*/
-  s: string | null;
+  s: string | string[] | null;
 }
 
 /**
@@ -347,7 +362,13 @@ export function inferDemandMapping(
 }
 
 export function demandMappingToCodes(m: DemandMetricMapping): string[] {
-  return Object.values(m).filter((v): v is string => !!v);
+  const out: string[] = [];
+  Object.values(m).forEach((v) => {
+    if (v == null) return;
+    if (Array.isArray(v)) out.push(...v);
+    else out.push(v);
+  });
+  return out;
 }
 
 /**
@@ -361,14 +382,18 @@ export function mergeDemandIntoEnergyRows(
   demandPoints: EnergyPoint[],
   demandMapping: DemandMetricMapping,
 ): import('../components/HistoryTable').HistoryRow[] {
-  if (!demandMapping.p || rows.length === 0) {
+  const pCodes = demandMapping.p;
+  if (!pCodes || rows.length === 0) {
     return rows.map((r) => ({ ...r, demand_p: null }));
   }
+  // M-PM-264 §三: 支援 string | string[]（ECSU 模式多 demand parameter_code）
+  const pCodeSet = new Set(Array.isArray(pCodes) ? pCodes : [pCodes]);
   // 取 demand p metric 對應 ts → value 的 map
   const tsToValue = new Map<string, number | null>();
   demandPoints.forEach((p) => {
-    if (p.parameter_code !== demandMapping.p) return;
+    if (!pCodeSet.has(p.parameter_code)) return;
     const v = p.avg_value ?? p.last_value ?? p.first_value;
+    if (v == null) return;
     tsToValue.set(p.ts, v);
   });
   return rows.map((r) => ({
@@ -390,10 +415,15 @@ export function energyPointsToRows(
   const byTs = new Map<string, Record<string, number | null>>();
 
   // reverse mapping：parameter_code → metric key
+  // M-PM-264 §三：支援 string | string[]（ECSU 模式多 parameter_code 同 metric）
   const codeToKey = new Map<string, EnergyMetricKey>();
-  (Object.entries(mapping) as Array<[EnergyMetricKey, string | null]>).forEach(([key, code]) => {
-    if (code) codeToKey.set(code, key);
-  });
+  (Object.entries(mapping) as Array<[EnergyMetricKey, string | string[] | null]>).forEach(
+    ([key, codes]) => {
+      if (codes == null) return;
+      if (Array.isArray(codes)) codes.forEach((c) => codeToKey.set(c, key));
+      else codeToKey.set(codes, key);
+    },
+  );
 
   points.forEach((p) => {
     const metricKey = codeToKey.get(p.parameter_code);

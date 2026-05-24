@@ -43,7 +43,7 @@ import {
   type EnergyMetricMapping,
 } from '../hooks/useEnergyReport';
 // M-PM-253 §二 動作 1: ECSU 下拉（取代既有實體迴路 selectors；老王 5/21 拍板）
-import { useEcsuList, buildEcsuTree } from '../hooks/useEcsu';
+import { useEcsuList, useEcsuCircuits, buildEcsuTree } from '../hooks/useEcsu';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -343,14 +343,22 @@ export default function Reports() {
   // backend mapping layer (M-P12-061 §3.2) 對 binding 自動 map circuit_code → mapped parameter_code
   // → frontend 傳 superset 確保 backend filter ∩ 全 binding mapped param
   //
+  // M-PM-264 §三（老王 5/22 覆寫拍板 1）：補 voltage / freq / current / pf / demand
+  // 5 metric variants（backend M-P12-065 已加 mapping + AVG mode）。
+  //
   // ECSU_PARAM_SUPERSET 對齊 device_circuits.py map_*_param mapping table:
-  //   cpm12d/cpm23 main: power_total, energy_kwh_imp
-  //   aem_drb main:       ma_p_sum, mb_p_sum, ma_ae_imp, mb_ae_imp
-  //   aem_drb branch:     ba1-12_p / bb1-12_p / ba1-12_ae_imp / bb1-12_ae_imp
-  //   aem_drb three_phase: ba1_3_p_sum...bb10_12_p_sum / 同 _ae_imp
-  // total ~60 codes; backend 自動 filter binding ∩ user_params
+  //   cpm12d main:  power_total, energy_kwh_imp, voltage_avg,   frequency, current_avg, power_factor_avg, demand_p_total
+  //   cpm23  main:  power_total, energy_kwh_imp, voltage_ll_avg, frequency, current_avg, power_factor_avg, demand_p_sum
+  //   aem_drb main: ma_p_sum/mb_p_sum, ma_ae_imp/mb_ae_imp,
+  //                 ma_v_avg/mb_v_avg, ma_freq/mb_freq, ma_i_avg/mb_i_avg, ma_pf/mb_pf, ma_p_dm/mb_p_dm
+  //   aem_drb branch (ba1-12, bb1-12):
+  //                 {cc}_p, {cc}_ae_imp, {cc}_i, {cc}_pf（_v/_freq/_dm 繼承 main）
+  //   aem_drb three_phase (ba1_3 ~ bb10_12):
+  //                 {cc}_p_sum, {cc}_ae_imp, {cc}_i_avg, {cc}_pf_avg（_v/_freq/_dm 繼承 main）
+  // total ~90 codes; backend 自動 filter binding ∩ user_params
   const ECSU_PARAM_SUPERSET = useMemo(() => [
-    'power_total', 'energy_kwh_imp',
+    // ── power + energy（既有；SUM × sign）
+    'power_total', 'energy_kwh_imp', 'energy_kwh_total',
     'ma_p_sum', 'mb_p_sum', 'ma_ae_imp', 'mb_ae_imp',
     ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
     ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
@@ -360,6 +368,24 @@ export default function Reports() {
     'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
     'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
     'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+    // ── voltage（M-PM-264 §三；AVG mode）
+    'voltage_avg', 'voltage_ll_avg', 'ma_v_avg', 'mb_v_avg',
+    // ── frequency（同 AVG mode；cpm `frequency` + aem `{ma|mb}_freq`）
+    'frequency', 'ma_freq', 'mb_freq',
+    // ── current（cpm `current_avg` + aem main `{ma|mb}_i_avg` + branch `{cc}_i` + 三相 `{cc}_i_avg`）
+    'current_avg', 'ma_i_avg', 'mb_i_avg',
+    ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_i`),
+    ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_i`),
+    'ba1_3_i_avg', 'ba4_6_i_avg', 'ba7_9_i_avg', 'ba10_12_i_avg',
+    'bb1_3_i_avg', 'bb4_6_i_avg', 'bb7_9_i_avg', 'bb10_12_i_avg',
+    // ── power_factor（cpm `power_factor_avg` + aem main `{ma|mb}_pf` + branch `{cc}_pf` + 三相 `{cc}_pf_avg`）
+    'power_factor_avg', 'ma_pf', 'mb_pf',
+    ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_pf`),
+    ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_pf`),
+    'ba1_3_pf_avg', 'ba4_6_pf_avg', 'ba7_9_pf_avg', 'ba10_12_pf_avg',
+    'bb1_3_pf_avg', 'bb4_6_pf_avg', 'bb7_9_pf_avg', 'bb10_12_pf_avg',
+    // ── demand_p（cpm12d `demand_p_total` / cpm23 `demand_p_sum` / aem `{ma|mb}_p_dm`；branch 繼承 main）
+    'demand_p_total', 'demand_p_sum', 'ma_p_dm', 'mb_p_dm',
   ], []);
 
   // M-P11-E24 Phase B: ENERGY_PARAM_SET — totalKwh 計算用（只 *_ae_imp + energy_kwh_imp/total 變體）
@@ -378,16 +404,47 @@ export default function Reports() {
     'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
   ]), []);
 
-  // M-PM-253 §二: ECSU 模式 mapping (Excel column rendering reuse)
-  // backend 自動聚合 → 只 power_total 與 energy_kwh_imp 對 ECSU 有 reliable 意義
-  // voltage / frequency / current / power_factor 對 ECSU 無 mapping → null
+  // M-PM-253 §二 / M-PM-264 §三（老王 5/22 覆寫拍板 1）:
+  //   ECSU 模式 mapping — 5 metric (voltage/freq/current/pf/demand_p) 改 AVG mode（backend M-P12-065）
+  //   多 parameter_code 同 metric key（cpm vs aem main vs aem branch 各自的 parameter_code），
+  //   useEnergyReport.ts energyPointsToRows 處理多值反向 map (string[] support)
+  //
+  // power_total / energy_kwh / power_factor 兼 power+energy SUM×sign mode 既有不動
+  // demand_p 為新加（M-PM-264 §三）→ mergeDemandIntoEnergyRows 流程繼續 reuse（demand_p column）
   const energyMapping: EnergyMetricMapping = useMemo(() => ({
-    voltage: null,
-    frequency: null,
-    current: null,
-    power_total: 'power_total',
-    power_factor: null,
-    energy_kwh: 'energy_kwh_imp',
+    // AVG mode（cpm vs aem main 兩種；branch _v/_freq 繼承 main 已在 backend mapping 處理）
+    voltage: ['voltage_avg', 'voltage_ll_avg', 'ma_v_avg', 'mb_v_avg'],
+    frequency: ['frequency', 'ma_freq', 'mb_freq'],
+    current: [
+      'current_avg', 'ma_i_avg', 'mb_i_avg',
+      ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_i`),
+      ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_i`),
+      'ba1_3_i_avg', 'ba4_6_i_avg', 'ba7_9_i_avg', 'ba10_12_i_avg',
+      'bb1_3_i_avg', 'bb4_6_i_avg', 'bb7_9_i_avg', 'bb10_12_i_avg',
+    ],
+    power_factor: [
+      'power_factor_avg', 'ma_pf', 'mb_pf',
+      ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_pf`),
+      ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_pf`),
+      'ba1_3_pf_avg', 'ba4_6_pf_avg', 'ba7_9_pf_avg', 'ba10_12_pf_avg',
+      'bb1_3_pf_avg', 'bb4_6_pf_avg', 'bb7_9_pf_avg', 'bb10_12_pf_avg',
+    ],
+    // SUM × sign mode（既有；ECSU 模式跨 binding × sign）
+    power_total: [
+      'power_total', 'ma_p_sum', 'mb_p_sum',
+      ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
+      ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
+      'ba1_3_p_sum', 'ba4_6_p_sum', 'ba7_9_p_sum', 'ba10_12_p_sum',
+      'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
+    ],
+    energy_kwh: [
+      'energy_kwh_imp', 'energy_kwh_total',
+      'ma_ae_imp', 'mb_ae_imp',
+      ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_ae_imp`),
+      ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_ae_imp`),
+      'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
+      'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+    ],
   }), []);
 
   // ECSU 模式不再用 inferEnergyMapping/mappingToParameterCodes
@@ -421,40 +478,137 @@ export default function Reports() {
   //     既有 reference 跟先前一致；行為僅多 demand_p 欄位
 
   // ─────────────────────────────────────────────────────────────
-  // M-PM-196 §一 / M-PM-198 同 deploy：Demand chart 對接
-  // - reuse useEnergyReport hook（同一 endpoint；只 parameter_codes 不同）
-  // - mapping 來源 inferDemandMapping（device + circuit）
-  // - chart 顯三條線：P/Q/S
+  // M-PM-264 §三 demand_p column（老王 5/22 覆寫拍板 1 後）
+  // - backend M-P12-065 已加 map_circuit_to_demand_param + AVG mode
+  // - 既有 ECSU_PARAM_SUPERSET 已含 demand_p_total/demand_p_sum/ma_p_dm/mb_p_dm
+  // - reuse energyReportData.points（不另開 fetch），mergeDemandIntoEnergyRows 處理多 parameter_code
   // ─────────────────────────────────────────────────────────────
-  // M-PM-253 §二: demand chart 同 ECSU 模式（Energy Tab 內 demand_p column）
-  // backend mapping layer 對 binding 不 include demand_p（M-P12-061 mapping 只 energy + power）
-  // → demand 對 ECSU 模式無 backend mapping → demand chart 對 ECSU 不顯數據（null）
-  // 對齊老王 5/21 拍板 1「Demand Tab 不改」精神（Demand Tab 已不在；demand_p column 在 Energy Tab 內顯空 OK）
   const demandMapping = useMemo(
-    () => inferDemandMapping(undefined, undefined),
+    () => ({
+      p: ['demand_p_total', 'demand_p_sum', 'ma_p_dm', 'mb_p_dm'] as string[],
+      q: null,
+      s: null,
+    }),
     [],
   );
-  const demandParamCodes = useMemo(
-    () => demandMappingToCodes(demandMapping),
-    [demandMapping],
-  );
-  // M-PM-253 §二: 暫不 fetch demand（無 backend mapping 對 ECSU；對齊拍板）
-  const demandReportFilter = null;
-  void demandParamCodes;
-  // M-PM-202: chart 已抽至 /trends 頁；本頁仍 fetch demand 用於 HistoryTable demand_p column（M-PM-203）
-  const { data: demandReportData } = useEnergyReport(demandReportFilter);
+  void inferDemandMapping; void demandMappingToCodes; // backward compat 保留 import
 
-  // M-PM-203: energyHistoryRows 合 demand_p column
-  // - reuse mergeDemandIntoEnergyRows（hook 提供）
-  // - demand p 對應 row.ts 找；無 → null（HistoryTable render 顯「—」）
-  const energyHistoryRows: HistoryRow[] = useMemo(
+  // M-PM-264 §三: energyHistoryRows 合 demand_p column（reuse energyReportData.points）
+  const energyHistoryRowsWithDemand: HistoryRow[] = useMemo(
     () =>
       mergeDemandIntoEnergyRows(
         energyHistoryRowsRaw,
-        demandReportData?.points ?? [],
+        energyReportData?.points ?? [],
         demandMapping,
       ),
-    [energyHistoryRowsRaw, demandReportData, demandMapping],
+    [energyHistoryRowsRaw, energyReportData, demandMapping],
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // M-PM-264 §三 Events column（老王 5/22 明示「事件直接帶入顯示」）
+  // - useEcsuCircuits(selectedEcsuId) → 取 ECSU 綁定 device_ids
+  // - 既有 /v1/reports/events fetch 後 frontend filter by device_ids
+  // - events.ts floor 到 granularity bucket → merge HistoryRow.events
+  // ─────────────────────────────────────────────────────────────
+  const { data: ecsuCircuitsData } = useEcsuCircuits(selectedEcsuId);
+  const ecsuBoundDeviceIds = useMemo(() => {
+    if (!ecsuCircuitsData?.circuits) return new Set<string>();
+    return new Set(
+      ecsuCircuitsData.circuits
+        .filter((c) => c.enabled !== false)
+        .map((c) => c.device_id),
+    );
+  }, [ecsuCircuitsData]);
+
+  const [energyEvents, setEnergyEvents] = useState<EventRow[]>([]);
+
+  useEffect(() => {
+    if (!selectedEcsuId || !energyHistoryRange) {
+      setEnergyEvents([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get('/reports/events', {
+          params: {
+            from_ts: energyHistoryRange[0].toISOString(),
+            to_ts: energyHistoryRange[1].toISOString(),
+            limit: 500,
+          },
+        });
+        if (cancelled) return;
+        const items: EventRow[] = Array.isArray(r.data) ? r.data : r.data?.items ?? [];
+        setEnergyEvents(items);
+      } catch {
+        if (!cancelled) setEnergyEvents([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEcsuId, energyHistoryRange]);
+
+  // ts bucket floor 工具（對齊 backend cagg bucket 起始時間）
+  const floorTsToBucket = useCallback(
+    (ts: string, gran: Granularity): string => {
+      const d = dayjs(ts);
+      if (gran === '5min') {
+        return d.startOf('minute').minute(Math.floor(d.minute() / 5) * 5).toISOString();
+      }
+      if (gran === '15min') {
+        return d.startOf('minute').minute(Math.floor(d.minute() / 15) * 15).toISOString();
+      }
+      if (gran === '1hr') return d.startOf('hour').toISOString();
+      if (gran === '1day') return d.startOf('day').toISOString();
+      return ts;
+    },
+    [],
+  );
+
+  // EventRow → AlertHistoryEvent shape（HistoryTable.events 期望此結構）
+  // severity 對齊：reports/events 用 'warn' / alerts 用 'warning'
+  const eventRowToAlertEvent = useCallback(
+    (e: EventRow): AlertHistoryEvent => ({
+      ts: e.ts ?? '',
+      alert_id: typeof e.event_id === 'number' ? e.event_id : 0,
+      rule_id: 0,
+      event_type: (e.event_kind as AlertHistoryEvent['event_type']) ?? 'triggered',
+      device_id: e.device_id ?? null,
+      edge_id: e.edge_id ?? null,
+      value: null,
+      message: e.message ?? null,
+      severity:
+        e.severity === 'warn' ? 'warning' : ((e.severity ?? 'info') as AlertHistoryEvent['severity']),
+      actor: null,
+      note: null,
+    }),
+    [],
+  );
+
+  // events filter by ECSU 綁定 device_ids + group by bucket ts
+  const eventsByBucket = useMemo(() => {
+    const map = new Map<string, AlertHistoryEvent[]>();
+    if (energyEvents.length === 0 || ecsuBoundDeviceIds.size === 0) return map;
+    energyEvents.forEach((e) => {
+      if (!e.ts || !e.device_id) return;
+      if (!ecsuBoundDeviceIds.has(e.device_id)) return;
+      const bucket = floorTsToBucket(e.ts, energyGranularity);
+      const arr = map.get(bucket) ?? [];
+      arr.push(eventRowToAlertEvent(e));
+      map.set(bucket, arr);
+    });
+    return map;
+  }, [energyEvents, ecsuBoundDeviceIds, energyGranularity, floorTsToBucket, eventRowToAlertEvent]);
+
+  // 合 events 進 energyHistoryRows
+  const energyHistoryRows: HistoryRow[] = useMemo(
+    () =>
+      energyHistoryRowsWithDemand.map((r) => ({
+        ...r,
+        events: eventsByBucket.get(r.ts) ?? [],
+      })),
+    [energyHistoryRowsWithDemand, eventsByBucket],
   );
 
   // 7 column 老王指定順序（[[M-PM-092]] §一 + [[M-PM-203]] 加需量）

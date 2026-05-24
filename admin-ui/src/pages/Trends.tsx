@@ -27,10 +27,13 @@ import { useEcsuList, buildEcsuTree } from '../hooks/useEcsu';
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
-// M-PM-253 §二: ECSU 模式 parameter_codes superset（對齊 backend mapping table）
+// M-PM-253 §二 / M-PM-264 §三: ECSU 模式 parameter_codes superset（對齊 backend mapping table）
 // reuse 同 Reports.tsx 的 ECSU_PARAM_SUPERSET（複製過來；未來可抽 hook 共享）
+// M-PM-264 §三：補 voltage/freq/current/pf/demand variants（即使 Trends chart 只 plot power 線，
+// SUPERSET 對齊 backend 7 metric mapping 避免 HTTP 422 / 對齊一致）
 const ECSU_PARAM_SUPERSET = [
-  'power_total', 'energy_kwh_imp',
+  // power + energy
+  'power_total', 'energy_kwh_imp', 'energy_kwh_total',
   'ma_p_sum', 'mb_p_sum', 'ma_ae_imp', 'mb_ae_imp',
   ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_p`),
   ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_p`),
@@ -40,6 +43,20 @@ const ECSU_PARAM_SUPERSET = [
   'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
   'ba1_3_ae_imp', 'ba4_6_ae_imp', 'ba7_9_ae_imp', 'ba10_12_ae_imp',
   'bb1_3_ae_imp', 'bb4_6_ae_imp', 'bb7_9_ae_imp', 'bb10_12_ae_imp',
+  // voltage / freq / current / pf / demand (M-PM-264 §三; AVG mode)
+  'voltage_avg', 'voltage_ll_avg', 'ma_v_avg', 'mb_v_avg',
+  'frequency', 'ma_freq', 'mb_freq',
+  'current_avg', 'ma_i_avg', 'mb_i_avg',
+  ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_i`),
+  ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_i`),
+  'ba1_3_i_avg', 'ba4_6_i_avg', 'ba7_9_i_avg', 'ba10_12_i_avg',
+  'bb1_3_i_avg', 'bb4_6_i_avg', 'bb7_9_i_avg', 'bb10_12_i_avg',
+  'power_factor_avg', 'ma_pf', 'mb_pf',
+  ...Array.from({ length: 12 }, (_, i) => `ba${i + 1}_pf`),
+  ...Array.from({ length: 12 }, (_, i) => `bb${i + 1}_pf`),
+  'ba1_3_pf_avg', 'ba4_6_pf_avg', 'ba7_9_pf_avg', 'ba10_12_pf_avg',
+  'bb1_3_pf_avg', 'bb4_6_pf_avg', 'bb7_9_pf_avg', 'bb10_12_pf_avg',
+  'demand_p_total', 'demand_p_sum', 'ma_p_dm', 'mb_p_dm',
 ];
 
 // power_total 相關 parameter_code（所有 type 的 power 變體）
