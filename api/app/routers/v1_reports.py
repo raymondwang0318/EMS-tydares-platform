@@ -226,9 +226,22 @@ async def _query_trx_time_bucket_for_ecsu(
     NB: trx_reading 無 first/last 直接欄；只回 avg/min/max；first/last/energy_delta 為 None
     （與 _query_trx_time_bucket device 路徑同行為）.
 
-    parameter_codes=None → 自動用 binding mapped params 全部（energy + power superset）.
+    parameter_codes=None → 自動用 binding mapped params 全部.
+
+    M-PM-264 §二: binding params 從 2 metric (energy+power) 擴成 7 metric
+    (energy/power/voltage/freq/current/pf/demand);
+    aggregation 依 parameter_code 分流 SUM × sign (energy/power) vs AVG 不乘 sign (其他 5).
     """
-    from app.constants.device_circuits import map_circuit_to_energy_param, map_circuit_to_power_param
+    from app.constants.device_circuits import (
+        classify_parameter_aggregation,
+        map_circuit_to_current_param,
+        map_circuit_to_demand_param,
+        map_circuit_to_energy_param,
+        map_circuit_to_frequency_param,
+        map_circuit_to_pf_param,
+        map_circuit_to_power_param,
+        map_circuit_to_voltage_param,
+    )
 
     # interval 受控白名單（雙保險防注入；對齊 _query_trx_time_bucket）
     if interval not in {"5 minutes", "1 hour"}:
@@ -246,14 +259,15 @@ async def _query_trx_time_bucket_for_ecsu(
 
     ecsu_code = bindings[0][4]
 
-    # 2. per-binding 推 parameter_code → (device_id, parameter_code) -> sign
+    # 2. per-binding 推 parameter_code (M-PM-264 §二: 7 metric superset)
     binding_param_signs: dict[tuple[str, str], int] = {}
     for b in bindings:
         _, device_id, circuit_code, sign, _ = b
-        e_param = map_circuit_to_energy_param(circuit_code, device_id)
-        p_param = map_circuit_to_power_param(circuit_code, device_id)
-        binding_param_signs[(device_id, e_param)] = sign
-        binding_param_signs[(device_id, p_param)] = sign
+        for mapper in (map_circuit_to_energy_param, map_circuit_to_power_param,
+                       map_circuit_to_voltage_param, map_circuit_to_frequency_param,
+                       map_circuit_to_current_param, map_circuit_to_pf_param,
+                       map_circuit_to_demand_param):
+            binding_param_signs[(device_id, mapper(circuit_code, device_id))] = sign
 
     # 3. 過濾 user_param_codes（None = 全收）
     if parameter_codes is None:
@@ -288,24 +302,37 @@ async def _query_trx_time_bucket_for_ecsu(
         "devices": devices, "params": params_arr,
     })).fetchall()
 
-    # 5. Python group by (bucket, parameter_code) + sum value * sign
+    # 5. Python group by (bucket, parameter_code) — M-PM-264 §二 mode 分流:
+    #    'sum_sign' (energy/power): SUM(value × sign)
+    #    'avg'      (V/F/I/PF/dem): AVG(value) 不乘 sign;每 binding 對 metric 1 個樣本,
+    #                                簡化:跨 binding 取 AVG = sum(values)/count(bindings)
     bucket_pcode_agg: dict[tuple, dict] = {}
     for r in rows:
         ts, dev, pc, avg_v, min_v, max_v = r
         sign = binding_param_signs.get((dev, pc), 0)
         if sign == 0:
             continue
+        mode = classify_parameter_aggregation(pc)
         key = (ts, pc)
-        agg = bucket_pcode_agg.setdefault(key, {"avg": 0.0, "min": None, "max": None})
-        if avg_v is not None: agg["avg"] += avg_v * sign
+        agg = bucket_pcode_agg.setdefault(key, {
+            "mode": mode, "avg": 0.0, "min": None, "max": None,
+            "_avg_sum": 0.0, "_avg_count": 0,
+        })
+        if mode == "sum_sign":
+            if avg_v is not None: agg["avg"] += avg_v * sign
+        else:  # avg mode: 跨 binding 平均;不乘 sign
+            if avg_v is not None:
+                agg["_avg_sum"] += avg_v
+                agg["_avg_count"] += 1
         if min_v is not None: agg["min"] = min_v if agg["min"] is None else min(agg["min"], min_v)
         if max_v is not None: agg["max"] = max_v if agg["max"] is None else max(agg["max"], max_v)
 
     # 6. 輸出對齊既有 row tuple shape (avg/min/max；first/last/energy_delta = None)
     out = []
     for (ts, pc), agg in sorted(bucket_pcode_agg.items()):
+        avg_out = (agg["_avg_sum"] / agg["_avg_count"]) if agg["mode"] == "avg" and agg["_avg_count"] > 0 else agg["avg"]
         out.append((ts, ecsu_code, pc,
-                    agg["avg"], agg["min"], agg["max"],
+                    avg_out, agg["min"], agg["max"],
                     None, None, None))
     return out
 
@@ -325,11 +352,24 @@ async def _query_cagg_view_for_ecsu(
     logical 'ba1' 不 match）。改用 Python per-binding 推 parameter_code（map_circuit_to_*_param）
     + SQL filter (device_id, parameter_code) IN pairs + sign multiply.
 
-    parameter_codes 語意（M-P12-063 Phase C 修）:
-      - None  → 自動用 binding mapped params 全部（energy + power superset）
+    parameter_codes 語意（M-P12-063 Phase C 修 / M-PM-264 §二 擴 5 metric）:
+      - None  → 自動用 binding mapped params 全部 (7 metric superset)
       - list  → user 指定 metric；取 binding mapped param ∩ user param 才有 data
+
+    M-PM-264 §二: aggregation 依 parameter_code 分流
+      - SUM × sign (energy/power; 既有不動)
+      - AVG 不乘 sign (voltage/freq/current/pf/demand; 平均值無正負意義)
     """
-    from app.constants.device_circuits import map_circuit_to_energy_param, map_circuit_to_power_param
+    from app.constants.device_circuits import (
+        classify_parameter_aggregation,
+        map_circuit_to_current_param,
+        map_circuit_to_demand_param,
+        map_circuit_to_energy_param,
+        map_circuit_to_frequency_param,
+        map_circuit_to_pf_param,
+        map_circuit_to_power_param,
+        map_circuit_to_voltage_param,
+    )
 
     # 1. 採證 ECSU 是否存在 + 列 bindings (enabled only)
     bindings = (await db.execute(text("""
@@ -344,16 +384,15 @@ async def _query_cagg_view_for_ecsu(
 
     ecsu_code = bindings[0][4]
 
-    # 2. per-binding 推 parameter_code（energy + power）;構造 (device_id, parameter_code, sign) tuples
-    # NB: caller user_param_codes 用於 final filter；mapping 候選為 superset.
+    # 2. per-binding 推 parameter_code (M-PM-264 §二: 7 metric superset)
     binding_param_signs: dict[tuple[str, str], int] = {}
     for b in bindings:
         _, device_id, circuit_code, sign, _ = b
-        # 取得能量 + 即時功率 param（caller 通常傳 energy；power 也支援為了 future-compat）
-        e_param = map_circuit_to_energy_param(circuit_code, device_id)
-        p_param = map_circuit_to_power_param(circuit_code, device_id)
-        binding_param_signs[(device_id, e_param)] = sign
-        binding_param_signs[(device_id, p_param)] = sign
+        for mapper in (map_circuit_to_energy_param, map_circuit_to_power_param,
+                       map_circuit_to_voltage_param, map_circuit_to_frequency_param,
+                       map_circuit_to_current_param, map_circuit_to_pf_param,
+                       map_circuit_to_demand_param):
+            binding_param_signs[(device_id, mapper(circuit_code, device_id))] = sign
 
     # 3. 與 user_param_codes 交集（filter 出 user 真正要的 metric）
     # M-P12-063 Phase C: parameter_codes=None → 不 filter，全收 binding mapped params
@@ -390,34 +429,46 @@ async def _query_cagg_view_for_ecsu(
         "devices": devices, "params": params_arr,
     })).fetchall()
 
-    # 5. Python 端 group by (bucket, parameter_code)，sum value * sign
-    # output tuple 對齊既有 (ts, group_key, parameter_code, avg, min, max, first, last, energy_delta)
+    # 5. Python 端 group by (bucket, parameter_code) — M-PM-264 §二 mode 分流:
+    #    'sum_sign' (energy/power): SUM(value × sign);保 first/last/energy_delta 累積能量差
+    #    'avg'      (V/F/I/PF/dem): AVG(value) 不乘 sign;跨 binding 平均;first/last/delta = None
     bucket_pcode_agg: dict[tuple, dict] = {}
     for r in rows:
         ts, dev, pc, avg_v, min_v, max_v, first_v, last_v = r
         sign = binding_param_signs.get((dev, pc), 0)
         if sign == 0:
             continue
+        mode = classify_parameter_aggregation(pc)
         key = (ts, pc)
         agg = bucket_pcode_agg.setdefault(key, {
-            "avg": 0.0, "min": None, "max": None,
+            "mode": mode, "avg": 0.0, "min": None, "max": None,
             "first": 0.0, "last": 0.0,
+            "_avg_sum": 0.0, "_avg_count": 0,
         })
-        if avg_v is not None: agg["avg"] += avg_v * sign
+        if mode == "sum_sign":
+            if avg_v is not None: agg["avg"] += avg_v * sign
+            if first_v is not None: agg["first"] += first_v * sign
+            if last_v is not None: agg["last"] += last_v * sign
+        else:  # avg mode: 跨 binding 平均;不乘 sign;不計 first/last
+            if avg_v is not None:
+                agg["_avg_sum"] += avg_v
+                agg["_avg_count"] += 1
         if min_v is not None: agg["min"] = min_v if agg["min"] is None else min(agg["min"], min_v)
         if max_v is not None: agg["max"] = max_v if agg["max"] is None else max(agg["max"], max_v)
-        if first_v is not None: agg["first"] += first_v * sign
-        if last_v is not None: agg["last"] += last_v * sign
 
     # 6. 輸出對齊既有 row tuple shape
     out = []
     for (ts, pc), agg in sorted(bucket_pcode_agg.items()):
-        out.append((
-            ts, ecsu_code, pc,
-            agg["avg"], agg["min"], agg["max"],
-            agg["first"], agg["last"],
-            agg["last"] - agg["first"],
-        ))
+        if agg["mode"] == "avg":
+            avg_out = (agg["_avg_sum"] / agg["_avg_count"]) if agg["_avg_count"] > 0 else None
+            out.append((ts, ecsu_code, pc,
+                        avg_out, agg["min"], agg["max"],
+                        None, None, None))  # AVG metric: first/last/delta = None
+        else:
+            out.append((ts, ecsu_code, pc,
+                        agg["avg"], agg["min"], agg["max"],
+                        agg["first"], agg["last"],
+                        agg["last"] - agg["first"]))
     return out
 
 

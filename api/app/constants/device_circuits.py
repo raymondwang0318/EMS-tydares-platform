@@ -176,3 +176,169 @@ def map_circuit_to_energy_param(circuit_code: str, device_id: str) -> str:
             return f"{cc}_ae_imp"
 
     return "energy_kwh_imp"  # fallback
+
+
+# ============================================================================
+# M-PM-264 §二: 5 metric mapping (voltage / freq / current / pf / demand)
+# 老王 5/22 hard reload 覆寫 M-P11-E19 拍板 1：必須有數據 → AVG (不乘 sign).
+# 採證源：trx_reading distinct parameter_code (M-PM-264 §一 採證 5/24);
+# aem_drb branch (ba/bb) 無自身 voltage/freq/demand register → 繼承 main (ma/mb)；
+# branch 自身有 _i (current) + _pf；三相聚合 (ba1_3 etc) 有 _i_avg + _pf_avg.
+# ============================================================================
+
+
+def _aem_branch_to_main(cc: str) -> str:
+    """aem_drb branch circuit_code → 對應 main (ba* → ma / bb* → mb / 三相聚合同).
+
+    用於 voltage / frequency / demand 等 branch 無 register 的 metric 繼承 main.
+    """
+    if cc.startswith("ba"):
+        return "ma"
+    if cc.startswith("bb"):
+        return "mb"
+    return cc  # ma / mb 自己 fallback
+
+
+def map_circuit_to_voltage_param(circuit_code: str, device_id: str) -> str:
+    """ECSU 平均電壓聚合用 parameter_code.
+
+    cpm23 → 'voltage_ll_avg' (線間電壓平均;業主一般指 380V 系列)
+    cpm12d → 'voltage_avg'
+    aem_drb ma/mb/branch → 'ma_v_avg' / 'mb_v_avg' (branch 繼承 main)
+    """
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind == "cpm23":
+        return "voltage_ll_avg"
+    if kind == "cpm12d":
+        return "voltage_avg"
+    if kind == "aem_drb":
+        main = _aem_branch_to_main(cc.split("-")[0] if "-" in cc else cc)
+        return f"{main}_v_avg"
+    return "voltage_avg"  # fallback
+
+
+def map_circuit_to_frequency_param(circuit_code: str, device_id: str) -> str:
+    """ECSU 平均頻率聚合用 parameter_code.
+
+    cpm23/cpm12d → 'frequency'
+    aem_drb ma/mb/branch → 'ma_freq' / 'mb_freq' (branch 繼承 main)
+    """
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind in ("cpm23", "cpm12d"):
+        return "frequency"
+    if kind == "aem_drb":
+        main = _aem_branch_to_main(cc.split("-")[0] if "-" in cc else cc)
+        return f"{main}_freq"
+    return "frequency"  # fallback
+
+
+def map_circuit_to_current_param(circuit_code: str, device_id: str) -> str:
+    """ECSU 平均電流聚合用 parameter_code.
+
+    cpm23/cpm12d → 'current_avg'
+    aem_drb ma/mb → 'ma_i_avg' / 'mb_i_avg'
+    aem_drb branch (ba1..ba12, bb1..bb12) → '{cc}_i' (per-branch)
+    aem_drb 三相聚合 (ba1-3 etc) → '{cc_underscore}_i_avg'
+    """
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind in ("cpm23", "cpm12d"):
+        return "current_avg"
+    if kind == "aem_drb":
+        if cc in ("ma", "mb"):
+            return f"{cc}_i_avg"
+        if "-" in cc and cc[:2] in ("ba", "bb"):
+            return cc.replace("-", "_") + "_i_avg"
+        if cc[:2] in ("ba", "bb"):
+            return f"{cc}_i"
+    return "current_avg"  # fallback
+
+
+def map_circuit_to_pf_param(circuit_code: str, device_id: str) -> str:
+    """ECSU 平均功率因數聚合用 parameter_code.
+
+    cpm23/cpm12d → 'power_factor_avg'
+    aem_drb ma/mb → 'ma_pf' / 'mb_pf'
+    aem_drb branch → '{cc}_pf' (per-branch)
+    aem_drb 三相聚合 → '{cc_underscore}_pf_avg'
+    """
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind in ("cpm23", "cpm12d"):
+        return "power_factor_avg"
+    if kind == "aem_drb":
+        if cc in ("ma", "mb"):
+            return f"{cc}_pf"
+        if "-" in cc and cc[:2] in ("ba", "bb"):
+            return cc.replace("-", "_") + "_pf_avg"
+        if cc[:2] in ("ba", "bb"):
+            return f"{cc}_pf"
+    return "power_factor_avg"  # fallback
+
+
+def map_circuit_to_demand_param(circuit_code: str, device_id: str) -> str:
+    """ECSU 平均需量聚合用 parameter_code (W active power demand).
+
+    cpm12d → 'demand_p_total'
+    cpm23 → 'demand_p_sum'
+    aem_drb ma/mb/branch → 'ma_p_dm' / 'mb_p_dm' (branch 繼承 main;register 無 per-branch demand)
+    """
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind == "cpm12d":
+        return "demand_p_total"
+    if kind == "cpm23":
+        return "demand_p_sum"
+    if kind == "aem_drb":
+        main = _aem_branch_to_main(cc.split("-")[0] if "-" in cc else cc)
+        return f"{main}_p_dm"
+    return "demand_p_sum"  # fallback
+
+
+# ============================================================================
+# M-PM-264 §二: aggregation mode classification
+# AVG metrics (不乘 sign;平均值無正負意義) vs SUM × sign metrics
+# ============================================================================
+
+# parameter_code → aggregation mode 'avg' or 'sum_sign'
+# AVG mode: 對應 5 metric (voltage / freq / current / pf / demand)
+# SUM × sign: 既有 power_total / energy_kwh_imp / ma_p_sum / ma_ae_imp / ... (M-P12-061 §3.2)
+
+
+def classify_parameter_aggregation(parameter_code: str) -> str:
+    """Return 'avg' for voltage/freq/current/pf/demand metrics; 'sum_sign' otherwise.
+
+    M-PM-264 §二: ECSU 模式聚合 mode 區分 — AVG 不乘 sign / SUM × sign 既有不動.
+
+    Patterns:
+      - voltage:  'voltage*' / '*_v_avg'
+      - freq:     'frequency' / '*_freq'
+      - current:  'current*' / '*_i_avg' / branch '*_i' (ba1_i etc; not power _p)
+                  → 用 '_i_avg' 結尾 + 'current' prefix + branch ba/bb 結尾 '_i' (非 _i_avg)
+      - pf:       'power_factor*' / '*_pf' / '*_pf_avg' / '*_pf1'
+      - demand:   'demand_*' / '*_p_dm'
+
+    注意：branch '*_i' (e.g. 'ba1_i') 是 AVG；但 '*_i_avg_thd_r' 是 AVG (THD ratio);
+    既有 'ma_p_sum' (power sum) 是 SUM × sign；'ba1_3_p_sum' 是 SUM × sign 不在此列.
+    """
+    pc = (parameter_code or "").lower()
+    # AVG metrics
+    if pc.startswith("voltage") or pc.endswith("_v_avg"):
+        return "avg"
+    if pc == "frequency" or pc.endswith("_freq"):
+        return "avg"
+    if pc.startswith("current"):
+        return "avg"
+    if pc.endswith("_i_avg") or pc.endswith("_i_avg_thd_r"):
+        return "avg"
+    # branch current: 'ba1_i', 'bb12_i' (single _i suffix, not _i_avg / _i_avg_thd_r)
+    if (pc.startswith("ba") or pc.startswith("bb")) and pc.endswith("_i") and "_p_" not in pc:
+        return "avg"
+    if pc.startswith("power_factor") or pc.endswith("_pf") or pc.endswith("_pf_avg") or pc.endswith("_pf1"):
+        return "avg"
+    if pc.startswith("demand_") or pc.endswith("_p_dm"):
+        return "avg"
+    # default: SUM × sign (既有行為 power / energy / ...)
+    return "sum_sign"
