@@ -299,8 +299,13 @@ async def confirm_devices(
     if not body.devices:
         raise HTTPException(status_code=400, detail="No devices to confirm")
 
-    # 1. Batch insert ems_device (ON CONFLICT DO NOTHING for idempotency)
+    # 1. Batch insert ems_device (ON CONFLICT 復活 soft-deleted row;M-PM-268 fix)
     #    + ems_device_modbus 子表（M-P12-034 補；admin-ui list 需 slave_id 等細節）
+    #
+    # M-PM-268 root cause: 原 ON CONFLICT DO NOTHING → 撞 soft-deleted row (deleted_at IS NOT NULL)
+    # 時 row 不被 INSERT 也不被 UPDATE → admin-ui list 取 WHERE deleted_at IS NULL 永遠空.
+    # 修: 改 DO UPDATE SET deleted_at=NULL 復活 + 更新 edge_id/kind/display_name
+    # (5/18 既建 cpm12d-E07-slave7 5/22 soft-deleted → 5/25 業主重掃復活).
     created_count = 0
     for dev in body.devices:
         device_kind = _DEVICE_KIND_MAP.get(dev.device_type, "other")
@@ -308,7 +313,12 @@ async def confirm_devices(
             text("""
                 INSERT INTO ems_device (device_id, edge_id, device_kind, display_name)
                 VALUES (:device_id, :edge_id, :device_kind, :display_name)
-                ON CONFLICT (device_id) DO NOTHING
+                ON CONFLICT (device_id) DO UPDATE
+                SET deleted_at = NULL,
+                    edge_id     = EXCLUDED.edge_id,
+                    device_kind = EXCLUDED.device_kind,
+                    display_name = EXCLUDED.display_name,
+                    updated_at  = NOW()
             """),
             {
                 "device_id": dev.device_id,
