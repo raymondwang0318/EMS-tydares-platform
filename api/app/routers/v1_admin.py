@@ -726,6 +726,69 @@ async def soft_delete_device(device_id: str, db: AsyncSession = Depends(get_db))
     return {"status": "deleted", "edge_config_version": new_version}
 
 
+# ========== /admin/devices/{device_id}/ecsu-bindings — M-PM-267 §二 ==========
+# device → ECSU 反向查詢；解業主刪除電表前「91 ECSU 逐筆檢查」痛點
+
+
+@router.get("/devices/{device_id}/ecsu-bindings")
+async def get_device_ecsu_bindings(device_id: str, db: AsyncSession = Depends(get_db)):
+    """列該 device 被哪些 ECSU 綁定（含 circuit_code + sign + enabled）.
+
+    M-PM-267 §二：給 device_id 反查 fnd_ecsu_circuit_assgn × fnd_ecsu；
+    用於刪除電表前對話框顯示「此設備被 N 個 ECSU 綁定：KW-XX·區域·名稱 ...」.
+
+    回傳全部 binding（含 enabled=false 的歷史綁定;frontend 自決如何呈現）.
+    一個 device 可有多個 circuit 各別 bind 不同 ECSU（spec 允許；現況 0 案例但保留邏輯）.
+
+    Response:
+        {
+          "device_id": "aem_drb-TYDARES-E04-slave20",
+          "bindings": [
+            {
+              "assgn_id": 3, "ecsu_id": 21, "ecsu_code": "KW-21",
+              "ecsu_name": "P1B", "region": null,
+              "circuit_code": "ba1", "sign": 1, "enabled": true,
+              "remark_desc": null
+            },
+            ...
+          ],
+          "total": 1,
+          "enabled_count": 1
+        }
+    """
+    rows = (await db.execute(text("""
+        SELECT a.assgn_id, a.ecsu_id, e.ecsu_code, e.ecsu_name, e.region,
+               a.circuit_code, a.sign, a.enabled, a.remark_desc
+        FROM fnd_ecsu_circuit_assgn a
+        JOIN fnd_ecsu e ON e.ecsu_id = a.ecsu_id
+        WHERE a.device_id = :device_id
+        ORDER BY a.enabled DESC, e.ecsu_code, a.circuit_code
+    """), {"device_id": device_id})).fetchall()
+
+    bindings = [
+        {
+            "assgn_id": r[0],
+            "ecsu_id": r[1],
+            "ecsu_code": r[2],
+            "ecsu_name": r[3],
+            "region": r[4],
+            "circuit_code": r[5],
+            "sign": r[6],
+            "enabled": r[7],
+            "remark_desc": r[8],
+        }
+        for r in rows
+    ]
+    enabled_count = sum(1 for b in bindings if b["enabled"])
+
+    return {
+        "device_id": device_id,
+        "bindings": bindings,
+        "total": len(bindings),
+        "enabled_count": enabled_count,
+    }
+
+
 # ========== /admin/ecsu ==========
 
 @router.get("/ecsu")
