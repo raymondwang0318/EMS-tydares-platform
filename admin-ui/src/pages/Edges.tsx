@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag } from 'antd';
+import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag, Spin } from 'antd';
 import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined, ClearOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { StatusTag } from '../components/common/StatusTag';
@@ -26,6 +26,7 @@ import {
 const HOSTNAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/;
 import { EdgeDrawer } from './EdgeDrawer';
 import { ScanWizard } from '../components/ScanWizard';
+import api from '../services/api';
 
 const { Title, Text } = Typography;
 
@@ -510,6 +511,77 @@ export default function Edges() {
   );
 }
 
+/**
+ * M-PM-267 §三: device → ECSU 反查綁定狀態（刪除對話框用）
+ * backend: GET /v1/admin/devices/{device_id}/ecsu-bindings（M-P12-068 commit da1fd44）
+ * 顯示：有綁 → ⚠️ N 個 ECSU + 清單；無綁 → ✅ 可安全刪除
+ */
+interface EcsuBinding {
+  assgn_id: number;
+  ecsu_id: number;
+  ecsu_code: string;
+  ecsu_name: string;
+  region: string | null;
+  circuit_code: string;
+  sign: number;
+  enabled: boolean;
+  remark_desc: string | null;
+}
+
+function DeviceEcsuBindingsInfo({ deviceId }: { deviceId: string }) {
+  const [loading, setLoading] = useState(true);
+  const [bindings, setBindings] = useState<EcsuBinding[]>([]);
+
+  useEffect(() => {
+    api
+      .get<{ bindings: EcsuBinding[] }>(`/admin/devices/${deviceId}/ecsu-bindings`)
+      .then((res) => setBindings(res.data.bindings))
+      .catch(() => setBindings([]))
+      .finally(() => setLoading(false));
+  }, [deviceId]);
+
+  if (loading) {
+    return (
+      <div style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Spin size="small" />
+        <Text type="secondary" style={{ fontSize: 12 }}>查詢 ECSU 綁定中…</Text>
+      </div>
+    );
+  }
+
+  if (bindings.length === 0) {
+    return (
+      <Alert
+        type="success"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="✅ 此設備未被任何 ECSU 綁定，可安全刪除"
+      />
+    );
+  }
+
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      message={`⚠️ 此設備被 ${bindings.length} 個 ECSU 綁定，刪除前請先解綁`}
+      description={
+        <ul style={{ margin: '4px 0 0', paddingLeft: 16 }}>
+          {bindings.map((b) => (
+            <li key={b.assgn_id}>
+              <Text code>{b.ecsu_code}</Text>
+              {b.region ? ` · ${b.region}` : ''}
+              {` · ${b.ecsu_name}`}
+              {!b.enabled && <Text type="secondary"> （已停用）</Text>}
+            </li>
+          ))}
+        </ul>
+      }
+    />
+  );
+}
+
 function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
   const { data: devices, isLoading, error, refetch } = useEdgeDevices(edgeId);
   const renameDevice = useRenameDevice();
@@ -539,8 +611,10 @@ function EdgeDevicesTable({ edgeId }: { edgeId: string }) {
             message={isPlaceholder ? '掃描佔位（ScanWizard bootstrap）' : '⚠️ 真實設備（非掃描佔位）'}
             description={isPlaceholder
               ? '本操作軟刪除（deleted_at 設值；GET filter 自動隱藏）；trx_reading 歷史保留。'
-              : '⚠️ 真實設備刪除會影響聚合與綁定；trx_reading 歷史保留；ECSU 綁定可能變孤兒。請確認此 device 已停用。'}
+              : 'trx_reading 歷史保留；刪除後聚合與驅動中斷。請確認此 device 已停用。'}
           />
+          {/* M-PM-267 §三: 真實設備顯示 ECSU 反查綁定狀態（取代模糊「ECSU 綁定可能變孤兒」警告）*/}
+          {!isPlaceholder && <DeviceEcsuBindingsInfo deviceId={dev.device_id} />}
           <div style={{ marginBottom: 8 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>device_id:</Text>{' '}
             <Text code copyable={{ text: dev.device_id }}>{dev.device_id}</Text>

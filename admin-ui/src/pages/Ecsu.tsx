@@ -13,12 +13,12 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
-  Button, Form, Input, InputNumber, Modal, Popconfirm, Space,
+  AutoComplete, Button, Form, Input, InputNumber, Modal, Popconfirm, Space,
   Spin, Switch, Table, Tag, Typography, message,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, LinkOutlined,
-  FileExcelOutlined,
+  FileExcelOutlined, CaretUpOutlined, CaretDownOutlined, SwapOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
@@ -139,8 +139,96 @@ export default function Ecsu() {
   const [editing, setEditing] = useState<EcsuRow | null>(null);
   const [form] = Form.useForm<EcsuFormBody>();
 
+  // M-PM-272 §A: 3 欄純前端排序（代碼 / 區域 / 綁定數）— 老王 5/26 拍板純前端 sort
+  type SortKey = 'ecsu_code' | 'region' | 'circuits';
+  type SortDir = 'asc' | 'desc';
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+
+  // none → asc → desc → none 三態；同時只有一欄 active
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      if (sortDir === 'asc') {
+        setSortDir('desc');
+      } else {
+        setSortKey(null);
+        setSortDir('asc');
+      }
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
+
+  // 排序 column header with ▲▼ icon
+  const SortHeader = ({ label, col }: { label: string; col: SortKey }) => {
+    const active = sortKey === col;
+    const color = active ? '#1677ff' : '#bfbfbf';
+    const icon = !active
+      ? <SwapOutlined style={{ fontSize: 11, color, transform: 'rotate(90deg)' }} />
+      : sortDir === 'asc'
+        ? <CaretUpOutlined style={{ fontSize: 11, color }} />
+        : <CaretDownOutlined style={{ fontSize: 11, color }} />;
+    return (
+      <span
+        style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+        onClick={() => handleSort(col)}
+      >
+        {label} {icon}
+      </span>
+    );
+  };
+
+  // M-PM-272 §B: distinct region 選項（從現有 rows 取去重清單；動態更新）
+  const distinctRegions = useMemo(() => {
+    if (!rows) return [];
+    const set = new Set(
+      rows.map((r) => r.region).filter((v): v is string => !!v),
+    );
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'zh-TW'));
+  }, [rows]);
+
   // 樹狀資料（parent_id 自參照；antd Table expandable）
   const treeData = useMemo(() => buildEcsuTree(rows ?? []), [rows]);
+
+  // M-PM-272 §A: 套用 sort（若 sortKey 為 null → 使用 buildEcsuTree 預設 code natural sort）
+  const KW_REGEX_SORT = /^KW-(\d+)$/;
+  const sortedTreeData = useMemo(() => {
+    if (!sortKey) return treeData;
+
+    const compareFn = (a: EcsuRow, b: EcsuRow): number => {
+      let result = 0;
+      if (sortKey === 'ecsu_code') {
+        const aM = a.ecsu_code.match(KW_REGEX_SORT);
+        const bM = b.ecsu_code.match(KW_REGEX_SORT);
+        if (aM && bM) result = parseInt(aM[1], 10) - parseInt(bM[1], 10);
+        else if (aM) result = -1;
+        else if (bM) result = 1;
+        else result = a.ecsu_code.localeCompare(b.ecsu_code);
+      } else if (sortKey === 'region') {
+        const ar = a.region ?? '';
+        const br = b.region ?? '';
+        if (!ar && br) return 1;  // null/empty 沉底
+        if (ar && !br) return -1;
+        result = ar.localeCompare(br, 'zh-TW');
+      } else if (sortKey === 'circuits') {
+        const ac =
+          queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', a.ecsu_id])?.count ?? -1;
+        const bc =
+          queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', b.ecsu_id])?.count ?? -1;
+        result = ac - bc;
+      }
+      return sortDir === 'asc' ? result : -result;
+    };
+
+    type TreeNode = EcsuRow & { children?: EcsuRow[] };
+    const sortTree = (nodes: TreeNode[]): TreeNode[] =>
+      [...nodes]
+        .sort(compareFn)
+        .map((n) => ({ ...n, children: n.children ? sortTree(n.children) : undefined }));
+
+    return sortTree(treeData as TreeNode[]);
+  }, [treeData, sortKey, sortDir, queryClient]);
 
   const openCreate = () => {
     setEditing(null);
@@ -209,14 +297,20 @@ export default function Ecsu() {
 
   const columns: ColumnsType<EcsuRow & { children?: EcsuRow[] }> = [
     // M-PM-248 §三-3 拍板：列表只隱藏 ID column；詳情頁 / 編輯 dialog 仍顯 ecsu_id（工程除錯用）
-    // 既有 M-PM-219 / M-P11-069 ID 列第一欄 → 本卷移除
-    { title: '代碼', dataIndex: 'ecsu_code', key: 'ecsu_code', width: 130 },
-    // M-PM-253 §二-3 / M-PM-255: 區域 region column（M-P12-061 backend ready；老王自填）
+    // M-PM-272 §A: 代碼欄加 ▲▼ 純前端排序
     {
-      title: '區域',
+      title: <SortHeader label="代碼" col="ecsu_code" />,
+      dataIndex: 'ecsu_code',
+      key: 'ecsu_code',
+      width: 140,
+    },
+    // M-PM-253 §二-3 / M-PM-255: 區域 region column（M-P12-061 backend ready；老王自填）
+    // M-PM-272 §A: 區域欄加 ▲▼ 純前端排序（NULL 沉底）
+    {
+      title: <SortHeader label="區域" col="region" />,
       dataIndex: 'region',
       key: 'region',
-      width: 130,
+      width: 140,
       render: (v: string | null) => v || <Text type="secondary">—</Text>,
     },
     { title: '名稱', dataIndex: 'ecsu_name', key: 'ecsu_name' },
@@ -228,9 +322,10 @@ export default function Ecsu() {
       render: (v: number | null) => (v ?? <Text type="secondary">—</Text>),
     },
     {
-      title: '綁定數',
+      // M-PM-272 §A: 綁定數欄加 ▲▼ 純前端排序（從 react-query cache 取 count）
+      title: <SortHeader label="綁定數" col="circuits" />,
       key: 'circuits_count',
-      width: 80,
+      width: 90,
       align: 'right',
       render: (_: unknown, row) => <CircuitsCountCell ecsuId={row.ecsu_id} />,
     },
@@ -317,7 +412,7 @@ export default function Ecsu() {
       <Table<EcsuRow & { children?: EcsuRow[] }>
         rowKey="ecsu_id"
         columns={columns}
-        dataSource={treeData}
+        dataSource={sortedTreeData as (EcsuRow & { children?: EcsuRow[] })[]}
         loading={isLoading}
         size="small"
         pagination={false}
@@ -360,8 +455,17 @@ export default function Ecsu() {
             <Input placeholder="例：農技大樓總幹線" />
           </Form.Item>
           {/* M-PM-253 §二-2 / M-PM-255: 區域 region 欄位（M-P12-061 backend ready；業主自填）*/}
-          <Form.Item name="region" label="區域" extra="自由文字；例：育成 Aa 區 / C 區 / 警衛區（業主自填；可留空）">
-            <Input placeholder="例：育成 Aa 區" maxLength={50} />
+          {/* M-PM-272 §B: 改 AutoComplete — 下拉顯示現有區域選項 + 支援自由輸入新值；可留空 */}
+          <Form.Item name="region" label="區域" extra="選擇已有區域或輸入新區域；可留空">
+            <AutoComplete
+              options={distinctRegions.map((r) => ({ value: r }))}
+              placeholder="例：育成 Aa 區 / C 區"
+              allowClear
+              maxLength={50}
+              filterOption={(inputValue, option) =>
+                option?.value?.toLowerCase().includes(inputValue.toLowerCase()) ?? false
+              }
+            />
           </Form.Item>
           <Form.Item name="parent_id" label="上層 ID（選填；樹狀層級）">
             <InputNumber style={{ width: '100%' }} placeholder="若為根節點留空" />
