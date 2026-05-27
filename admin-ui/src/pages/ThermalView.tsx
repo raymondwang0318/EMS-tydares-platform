@@ -12,14 +12,15 @@
  *   - 多 SSE 同時聚合 frame；以 device_id 為索引
  *   - 不顯示 Edge 來源；16 顆固定按鈕 TC01~TC16（M-PM-277）
  *
- * M-PM-277 調整：
+ * M-PM-277 調整（含 §二次迭代）：
  *   - 移除在線狀態 / 最後更新時間顯示
- *   - 下拉選單 → 16 顆固定按鈕 TC01~TC16
+ *   - 下拉選單 → 4×4 固定按鈕格 TC01~TC16
+ *   - 按鈕帶入 IR 標籤管理設定的安裝位置名稱（display_name 去除 -TCxx 後綴）
  *   - 在線=綠色, 離線=藍色, 選中=金色外框
  *   - 斷線後保留最後一張畫面（frames state 不清除）
  */
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Button, Card, Space, Spin, Typography } from 'antd';
+import { Button, Card, Spin, Typography } from 'antd';
 import type { ThermalSummary } from '../models/thermal';
 import { ThermalDisplay } from '../components/thermal/ThermalDisplay';
 import { normalizeIrdata, computeSummary } from '../utils/thermalProcessor';
@@ -30,6 +31,7 @@ import { useEdges } from '../hooks/useEdges';
 const { Title } = Typography;
 
 const TC_COUNT = 16;
+const COLS = 4; // 4 欄 × 4 列
 
 type FrameState = {
   deviceId: string;
@@ -40,23 +42,36 @@ type FrameState = {
   summary: ThermalSummary;
 };
 
+type TcButtonData = {
+  num: number;
+  deviceId: string | undefined;
+  location: string; // display_name 去除 -TCxx 後綴（供操作人員辨識安裝場所）
+  isOnline: boolean;
+  isSelected: boolean;
+};
+
 export default function ThermalView() {
   const [frames, setFrames] = useState<Record<string, FrameState>>({});
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>();
 
-  // 對齊 admin-ui IR 標籤頁的 display_name（安裝位置標籤）
   const { data: irDevicesData } = useIrDevices();
   const { data: edgesData } = useEdges();
 
   /**
-   * TC 編號 → device_id 對應表
+   * TC 編號 → { deviceId, location } 對應表
    * display_name 後綴規則：…-TC01 / …-TC16 等
+   * location = display_name 去除 -TCxx 後綴，作為操作人員辨識安裝場所的名稱
    */
-  const tcToDeviceId = useMemo(() => {
-    const m = new Map<number, string>();
+  const tcToInfo = useMemo(() => {
+    const m = new Map<number, { deviceId: string; location: string }>();
     (irDevicesData ?? []).forEach((d) => {
-      const match = (d.display_name ?? '').match(/TC(\d{1,2})$/i);
-      if (match) m.set(parseInt(match[1], 10), d.device_id);
+      const dn = d.display_name ?? '';
+      const match = dn.match(/TC(\d{1,2})$/i);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        const location = dn.replace(/-?TC\d{1,2}$/i, '').trim();
+        m.set(num, { deviceId: d.device_id, location });
+      }
     });
     return m;
   }, [irDevicesData]);
@@ -71,7 +86,6 @@ export default function ThermalView() {
 
   const handleFrame = useCallback(
     (sseFrame: { device_id: string; ts: string; image?: string; irdata: string; shift: string }) => {
-      // legacy guard：無 image 不渲染（M-PM-104 §2.2 撤 fallback；走完整 JPEG 路徑）
       if (!sseFrame.image) return;
 
       const state: FrameState = {
@@ -85,8 +99,6 @@ export default function ThermalView() {
 
       // 斷線後保留最後一張：frames 只增不清（M-PM-277）
       setFrames((prev) => ({ ...prev, [sseFrame.device_id]: state }));
-
-      // 自動選第一台
       setSelectedDevice((prev) => prev || sseFrame.device_id);
     },
     [],
@@ -94,10 +106,8 @@ export default function ThermalView() {
 
   useEffect(() => {
     if (sseBaseUrls.length === 0) return;
-
     thermalSSEClient.connectMulti(sseBaseUrls);
     const unsub = thermalSSEClient.onFrame(handleFrame);
-
     return () => {
       unsub();
       thermalSSEClient.disconnect();
@@ -105,20 +115,20 @@ export default function ThermalView() {
   }, [sseBaseUrls, handleFrame]);
 
   /**
-   * 16 顆固定按鈕資料（M-PM-277）
-   * - isOnline：frames 中有該 device_id = 曾接收過 frame（SSE 推送中或斷線後保留）
-   * - isSelected：當前選中
+   * 16 顆按鈕資料，4 欄排列
    */
-  const tcButtons = useMemo(
+  const tcButtons = useMemo<TcButtonData[]>(
     () =>
       Array.from({ length: TC_COUNT }, (_, i) => {
         const num = i + 1;
-        const deviceId = tcToDeviceId.get(num);
+        const info = tcToInfo.get(num);
+        const deviceId = info?.deviceId;
+        const location = info?.location ?? '';
         const isOnline = !!deviceId && !!frames[deviceId];
         const isSelected = !!deviceId && selectedDevice === deviceId;
-        return { num, deviceId, isOnline, isSelected };
+        return { num, deviceId, location, isOnline, isSelected };
       }),
-    [tcToDeviceId, frames, selectedDevice],
+    [tcToInfo, frames, selectedDevice],
   );
 
   const frame = selectedDevice ? frames[selectedDevice] : null;
@@ -131,32 +141,47 @@ export default function ThermalView() {
         </Title>
       </div>
 
-      {/* 16 顆固定 TC 按鈕（M-PM-277：在線=綠, 離線=藍, 選中=金框） */}
-      <Space wrap style={{ marginBottom: 16 }}>
-        {tcButtons.map(({ num, deviceId, isOnline, isSelected }) => {
-          const label = `TC${String(num).padStart(2, '0')}`;
+      {/* 4×4 固定按鈕格（M-PM-277：在線=綠, 離線=藍, 選中=金框；含安裝位置名稱） */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
+          gap: 8,
+          marginBottom: 16,
+        }}
+      >
+        {tcButtons.map(({ num, deviceId, location, isOnline, isSelected }) => {
+          const tcCode = `TC${String(num).padStart(2, '0')}`;
           const bg = isOnline ? '#52c41a' : '#1677ff';
           return (
             <Button
               key={num}
-              size="small"
+              block
               onClick={() => deviceId && setSelectedDevice(deviceId)}
               disabled={!deviceId}
               style={{
                 backgroundColor: bg,
                 borderColor: isSelected ? '#faad14' : bg,
                 color: '#fff',
-                fontWeight: isSelected ? 700 : 400,
                 boxShadow: isSelected ? '0 0 0 2px #faad14' : undefined,
                 opacity: deviceId ? 1 : 0.35,
-                minWidth: 54,
+                height: 'auto',
+                padding: '6px 8px',
+                textAlign: 'center',
+                lineHeight: 1.3,
               }}
             >
-              {label}
+              {/* TC 編號（粗體）+ 安裝位置名稱（小字） */}
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</div>
+              {location && (
+                <div style={{ fontSize: 11, opacity: 0.92, marginTop: 2, whiteSpace: 'normal', wordBreak: 'break-all' }}>
+                  {location}
+                </div>
+              )}
             </Button>
           );
         })}
-      </Space>
+      </div>
 
       {frame ? (
         <Card size="small" styles={{ body: { padding: 0, overflow: 'hidden' } }}>
