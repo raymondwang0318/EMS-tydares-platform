@@ -503,68 +503,42 @@ async def _query_cagg_view(
             db, view, bucket_col, ecsu_id, from_ts, to_ts, parameter_codes,
         )
 
-    if group_by == "device":
-        where_clauses = [
-            f"{bucket_col} >= :from_ts",
-            f"{bucket_col} < :to_ts",
-            "parameter_code = ANY(:param_codes)",
-        ]
-        if device_ids:
-            where_clauses.append("device_id = ANY(:device_ids)")
-            params["device_ids"] = device_ids
-        if circuit_id:
-            where_clauses.append("parameter_code LIKE :circuit_prefix")
-            params["circuit_prefix"] = f"{circuit_id}_%"
-        where_sql = " AND ".join(where_clauses)
+    # M-PM-276 §二 fix (M-PM-258 §3.1 + M-P12-061 §3.3 升報候選兌現):
+    # 移除舊 ecsu group_by 路徑 (M-PM-237 root cause C 撞 'Ma' vs 'ba1' JOIN broken;永遠 0 點)
+    # 走 group_by=ecsu 必傳 ecsu_id；不傳 raise 422 (caller 須改用 ecsu_id 新路徑).
+    if group_by == "ecsu":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "group_by=ecsu requires ecsu_id parameter; "
+                "use ?ecsu_id=<id> for single-ECSU aggregation (M-PM-276 §二 / M-PM-258 §3.1). "
+                "Multi-ECSU cross-aggregation not supported (no current caller)."
+            ),
+        )
 
-        sql = f"""
-            SELECT {bucket_col} AS ts, device_id AS group_key,
-                   parameter_code, avg_value, min_value, max_value,
-                   first_value, last_value,
-                   (last_value - first_value) AS energy_delta
-            FROM {view}
-            WHERE {where_sql}
-            ORDER BY {bucket_col}
-        """
-    else:
-        # ecsu 分組（既有路徑保留）+ M-PM-253 §一 ecsu_id filter
-        where_clauses = [
-            f"r.{bucket_col} >= :from_ts",
-            f"r.{bucket_col} < :to_ts",
-            "r.parameter_code = ANY(:param_codes)",
-        ]
-        if device_ids:
-            where_clauses.append("r.device_id = ANY(:device_ids)")
-            params["device_ids"] = device_ids
-        if circuit_id:
-            where_clauses.append("r.parameter_code LIKE :circuit_prefix")
-            params["circuit_prefix"] = f"{circuit_id}_%"
-        if ecsu_id is not None:
-            # M-PM-253 §一: 單一 ECSU filter；reuse 既有 ecsu group_by SQL，加 WHERE a.ecsu_id 限縮.
-            # NB: M-P12-052 mapping layer 既建處理 ECSU realtime/monthly per-binding；本路徑走
-            # cagg group_by ecsu_code，sign-based SUM (e.g. 主+分支 sign=+1, 抵減 sign=-1).
-            where_clauses.append("a.ecsu_id = :ecsu_id")
-            params["ecsu_id"] = ecsu_id
-        where_sql = " AND ".join(where_clauses)
+    # group_by=device 路徑（既有不動）
+    where_clauses = [
+        f"{bucket_col} >= :from_ts",
+        f"{bucket_col} < :to_ts",
+        "parameter_code = ANY(:param_codes)",
+    ]
+    if device_ids:
+        where_clauses.append("device_id = ANY(:device_ids)")
+        params["device_ids"] = device_ids
+    if circuit_id:
+        where_clauses.append("parameter_code LIKE :circuit_prefix")
+        params["circuit_prefix"] = f"{circuit_id}_%"
+    where_sql = " AND ".join(where_clauses)
 
-        sql = f"""
-            SELECT r.{bucket_col} AS ts,
-                   e.ecsu_code AS group_key,
-                   r.parameter_code,
-                   SUM(r.avg_value * a.sign)  AS avg_value,
-                   MIN(r.min_value) AS min_value,
-                   MAX(r.max_value) AS max_value,
-                   SUM(r.first_value * a.sign) AS first_value,
-                   SUM(r.last_value  * a.sign) AS last_value,
-                   SUM((r.last_value - r.first_value) * a.sign) AS energy_delta
-            FROM {view} r
-            JOIN fnd_ecsu_circuit_assgn a
-              ON a.device_id = r.device_id AND a.circuit_code = r.circuit_code AND a.enabled
-            JOIN fnd_ecsu e ON e.ecsu_id = a.ecsu_id
-            WHERE {where_sql}
-            GROUP BY r.{bucket_col}, e.ecsu_code, r.parameter_code
-            ORDER BY r.{bucket_col}
-        """
+    sql = f"""
+        SELECT {bucket_col} AS ts, device_id AS group_key,
+               parameter_code, avg_value, min_value, max_value,
+               first_value, last_value,
+               (last_value - first_value) AS energy_delta
+        FROM {view}
+        WHERE {where_sql}
+        ORDER BY {bucket_col}
+    """
 
     return (await db.execute(text(sql), params)).fetchall()
 

@@ -29,7 +29,7 @@ from app.models import (
     FndEcsuCircuitAssgn,
     FndElectricParameter,
 )
-from app.services import command_service, config_service
+from app.services import config_service
 from app.services.wakeup_service import send_wakeup
 from app.constants.device_circuits import (
     DEVICE_MODEL_CIRCUITS,
@@ -384,64 +384,19 @@ async def confirm_devices(
     )
     await db.commit()
 
-    # 3. Build device.configure payload — 完整 snapshot（Edge 全量覆寫 active_devices.json）
-    existing_map: Dict[str, Dict[str, Any]] = {}
-    rows = await db.execute(
-        text("""
-            SELECT payload_json FROM ems_commands
-            WHERE command_type = 'device.configure'
-              AND status = 'SUCCEEDED'
-              AND device_id IN (SELECT device_id FROM ems_device WHERE edge_id = :edge_id)
-            ORDER BY updated_at DESC
-        """),
-        {"edge_id": edge_id},
-    )
-    for (payload,) in rows.fetchall():
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        for d in (payload or {}).get("devices", []):
-            code = d.get("device_code")
-            if code and code not in existing_map:
-                existing_map[code] = d
+    # 3. Bump edge config_version — Edge 主動 pull /desired-config (ADR-026)
+    #
+    # M-PM-276 §一 fix (M-P12-067 §七.1 升報候選兌現):
+    # 既有 step 3-4 build device.configure payload + 派 device.configure cmd 已 deprecated
+    # (V2-final ADR-026: Edge 主動 pull /v1/edges/{id}/desired-config snapshot 取代 push cmd);
+    # Edge 拒絕 device.configure cmd 回 FAILED 累積 ems_commands FAILED row + ems_events
+    # command error log 沒實質效用.
+    #
+    # 改: 純 bump config_version → Edge 下次 pull /desired-config 拿全量 active_devices snapshot.
+    # config_service.bump_edge_config_version 既有 helper (M-PM-148 之後 V2-final 既建模式).
+    new_config_version = await config_service.bump_edge_config_version(db, edge_id)
 
-    # 本次 body.devices 覆蓋既有
-    for dev in body.devices:
-        active_circuits: Dict[str, Dict[str, Any]] = {}
-        for c in dev.circuits:
-            active_circuits[c.circuit] = {
-                "ct_pri": c.ct_pri,
-                "wire": c.wire,
-                "label": "",
-            }
-        existing_map[dev.device_id] = {
-            "device_code": dev.device_id,
-            "device_type": dev.device_type,  # 保留 frontend 命名給 Edge
-            "slave_id": dev.slave_id,
-            "bus_id": dev.bus_id,
-            "active_circuits": active_circuits,
-        }
-
-    # 過濾 placeholder + 已刪除設備
-    valid_rows = await db.execute(
-        text("SELECT device_id FROM ems_device WHERE edge_id = :edge_id"),
-        {"edge_id": edge_id},
-    )
-    valid_ids = {r[0] for r in valid_rows.fetchall() if not r[0].startswith("_")}
-    configure_devices = [d for code, d in existing_map.items() if code in valid_ids]
-
-    # 4. Issue device.configure command
-    configure_command_id = await command_service.create_command(
-        db=db,
-        edge_id=edge_id,
-        device_id=body.devices[0].device_id,
-        command_type="device.configure",
-        payload={"devices": configure_devices},
-        priority=0,
-        idempotency_key=None,
-        issued_by="admin-ui",
-    )
-
-    # 5. MQTT wake-up（non-fatal）
+    # 4. MQTT wake-up — 通知 Edge 立即 pull 新 config (non-fatal)
     try:
         send_wakeup(edge_id=edge_id)
     except Exception:
@@ -449,7 +404,7 @@ async def confirm_devices(
 
     return {
         "created_count": created_count,
-        "command_id": configure_command_id,
+        "edge_config_version": new_config_version,
     }
 
 
