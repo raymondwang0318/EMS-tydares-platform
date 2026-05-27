@@ -84,6 +84,7 @@ services:
     environment:
       - ICPDAS_SUBNET=192.168.10.0/24
       - ICPDAS_OUI=00:0d:e0
+      - ICPDAS_IFACE=ens18   # 必要;預設 arp-scan 走 docker bridge interface 找 0 device
       - EMS_API_URL=http://localhost:8080
       - SCAN_INTERVAL_SEC=3600
     env_file:

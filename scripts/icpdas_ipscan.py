@@ -45,10 +45,11 @@ import urllib.request
 from datetime import datetime, timezone
 
 
-# ARP-scan output line pattern:
-#   192.168.10.83   00:0d:e0:92:11:55   ICP DAS Co., Ltd.
+# ARP-scan output line pattern (vendor 欄 optional;--quiet 模式無 vendor):
+#   192.168.10.83   00:0d:e0:92:11:55   ICP DAS Co., Ltd.  (default mode)
+#   192.168.10.83   00:0d:e0:92:11:55                       (--quiet mode)
 _ARP_LINE = re.compile(
-    r"^(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F:]{17})\s+(.*)$"
+    r"^(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F:]{17})(?:\s+(.*))?$"
 )
 
 
@@ -58,7 +59,8 @@ def run_arp_scan(subnet: str, interface: str | None = None) -> list[tuple[str, s
     Requires arp-scan tool installed (apt install arp-scan).
     Requires root or CAP_NET_RAW (container handles via host network).
     """
-    cmd = ["arp-scan", "--quiet"]
+    # NB: 不用 --quiet (會去掉 vendor 欄);保留預設給 OUI vendor 對 debug 有用
+    cmd = ["arp-scan"]
     if interface:
         cmd.extend(["--interface", interface])
     cmd.append(subnet)
@@ -80,7 +82,7 @@ def run_arp_scan(subnet: str, interface: str | None = None) -> list[tuple[str, s
         m = _ARP_LINE.match(line.strip())
         if m:
             ip, mac, vendor = m.groups()
-            devices.append((ip, mac.lower(), vendor))
+            devices.append((ip, mac.lower(), vendor or ""))
     return devices
 
 
