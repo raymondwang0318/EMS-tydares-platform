@@ -181,6 +181,7 @@ export default function ThermalView() {
           gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
           gap: 8,
           marginBottom: 16,
+          width: '80%',
         }}
       >
         {tcButtons.map(({ num, deviceId, location, isOnline, isSelected }) => {
@@ -207,6 +208,8 @@ export default function ThermalView() {
                 padding: '6px 8px',
                 textAlign: 'center',
                 lineHeight: 1.3,
+                whiteSpace: 'normal',
+                wordBreak: 'break-all',
               }}
             >
               <div style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</div>
