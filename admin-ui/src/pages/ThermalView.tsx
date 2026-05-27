@@ -10,19 +10,26 @@
  * 實作（multi-edge fan-in）：
  *   - useEdges() 列所有 active edges → 對每顆 Edge 直連 SSE（CORS ACAO=* 已驗）
  *   - 多 SSE 同時聚合 frame；以 device_id 為索引
- *   - 不顯示 Edge 來源；列出所有看到 frame 的 IR + display_name 作辨識
- *   - 老王在 IR 標籤管理頁改 display_name → 此處下拉同步（safe sort + idle filter）
+ *   - 不顯示 Edge 來源；16 顆固定按鈕 TC01~TC16（M-PM-277）
+ *
+ * M-PM-277 調整：
+ *   - 移除在線狀態 / 最後更新時間顯示
+ *   - 下拉選單 → 16 顆固定按鈕 TC01~TC16
+ *   - 在線=綠色, 離線=藍色, 選中=金色外框
+ *   - 斷線後保留最後一張畫面（frames state 不清除）
  */
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Card, Tag, Typography, Spin, Badge, Select, Space } from 'antd';
+import { Button, Card, Space, Spin, Typography } from 'antd';
 import type { ThermalSummary } from '../models/thermal';
 import { ThermalDisplay } from '../components/thermal/ThermalDisplay';
 import { normalizeIrdata, computeSummary } from '../utils/thermalProcessor';
 import { thermalSSEClient } from '../services/thermalSource';
-import { useIrDevices, irDisplayLabel } from '../hooks/useIrDevices';
+import { useIrDevices } from '../hooks/useIrDevices';
 import { useEdges } from '../hooks/useEdges';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
+
+const TC_COUNT = 16;
 
 type FrameState = {
   deviceId: string;
@@ -36,24 +43,25 @@ type FrameState = {
 export default function ThermalView() {
   const [frames, setFrames] = useState<Record<string, FrameState>>({});
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>();
-  const [lastUpdate, setLastUpdate] = useState('');
-  const [activeConnections, setActiveConnections] = useState(0);
-  const [totalConnections, setTotalConnections] = useState(0);
 
   // 對齊 admin-ui IR 標籤頁的 display_name（安裝位置標籤）
   const { data: irDevicesData } = useIrDevices();
   const { data: edgesData } = useEdges();
 
-  const irNameMap = useMemo(() => {
-    const m = new Map<string, string>();
-    (irDevicesData ?? []).forEach((d, idx) => {
-      m.set(d.device_id, irDisplayLabel(d, idx));
+  /**
+   * TC 編號 → device_id 對應表
+   * display_name 後綴規則：…-TC01 / …-TC16 等
+   */
+  const tcToDeviceId = useMemo(() => {
+    const m = new Map<number, string>();
+    (irDevicesData ?? []).forEach((d) => {
+      const match = (d.display_name ?? '').match(/TC(\d{1,2})$/i);
+      if (match) m.set(parseInt(match[1], 10), d.device_id);
     });
     return m;
   }, [irDevicesData]);
 
   // M-PM-158 multi-edge fan-in：所有 active edges 的 SSE base URL
-  // active = approved / maintenance；用 last_seen_ip LAN 直連（CORS ACAO=* 已驗）
   const sseBaseUrls = useMemo(() => {
     const active = (edgesData ?? []).filter(
       (e) => (e.status === 'approved' || e.status === 'maintenance') && e.last_seen_ip,
@@ -75,8 +83,8 @@ export default function ThermalView() {
         summary: computeSummary(normalizeIrdata(sseFrame.irdata)),
       };
 
+      // 斷線後保留最後一張：frames 只增不清（M-PM-277）
       setFrames((prev) => ({ ...prev, [sseFrame.device_id]: state }));
-      setLastUpdate(new Date().toLocaleString('zh-TW'));
 
       // 自動選第一台
       setSelectedDevice((prev) => prev || sseFrame.device_id);
@@ -88,93 +96,66 @@ export default function ThermalView() {
     if (sseBaseUrls.length === 0) return;
 
     thermalSSEClient.connectMulti(sseBaseUrls);
-
-    const checkInterval = setInterval(() => {
-      setActiveConnections(thermalSSEClient.activeConnectionCount);
-      setTotalConnections(thermalSSEClient.totalConnectionCount);
-    }, 2000);
-
     const unsub = thermalSSEClient.onFrame(handleFrame);
 
     return () => {
-      clearInterval(checkInterval);
       unsub();
       thermalSSEClient.disconnect();
     };
   }, [sseBaseUrls, handleFrame]);
 
-  // 設備清單：聯集（所有看過 frame 的 device_id + 所有已標記的 IR 設備）
-  // 設計：device_id 是 MAC（主鍵）；display_name 是安裝位置標籤（人讀辨識）
-  const allDeviceIds = useMemo(() => {
-    const ids = new Set<string>();
-    Object.keys(frames).forEach((id) => ids.add(id));
-    (irDevicesData ?? []).forEach((d) => ids.add(d.device_id));
-    return Array.from(ids).sort();
-  }, [frames, irDevicesData]);
-
-  const deviceOptions = allDeviceIds.map((id) => {
-    const hasFrame = !!frames[id];
-    const label = irNameMap.get(id) ?? id;
-    return {
-      value: id,
-      label: (
-        <Space size={4}>
-          <Tag color={hasFrame ? 'green' : 'default'} style={{ marginRight: 0 }}>
-            {hasFrame ? '在線' : '離線'}
-          </Tag>
-          <span>{label}</span>
-        </Space>
-      ),
-    };
-  });
+  /**
+   * 16 顆固定按鈕資料（M-PM-277）
+   * - isOnline：frames 中有該 device_id = 曾接收過 frame（SSE 推送中或斷線後保留）
+   * - isSelected：當前選中
+   */
+  const tcButtons = useMemo(
+    () =>
+      Array.from({ length: TC_COUNT }, (_, i) => {
+        const num = i + 1;
+        const deviceId = tcToDeviceId.get(num);
+        const isOnline = !!deviceId && !!frames[deviceId];
+        const isSelected = !!deviceId && selectedDevice === deviceId;
+        return { num, deviceId, isOnline, isSelected };
+      }),
+    [tcToDeviceId, frames, selectedDevice],
+  );
 
   const frame = selectedDevice ? frames[selectedDevice] : null;
-  const onlineCount = Object.keys(frames).length;
 
   return (
     <Spin spinning={false}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 16,
-        }}
-      >
+      <div style={{ marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           熱力圖即時監控
         </Title>
-        <Badge
-          status={activeConnections > 0 ? 'success' : 'error'}
-          text={
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              SSE {activeConnections}/{totalConnections} Edge 連線中
-            </Text>
-          }
-        />
       </div>
 
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Select
-          style={{ width: 360 }}
-          placeholder="選擇 811C 設備（依安裝位置標籤）"
-          value={selectedDevice}
-          onChange={setSelectedDevice}
-          options={deviceOptions}
-          notFoundContent="等待 SSE 串流"
-          showSearch
-          optionFilterProp="label"
-          // antd Select 的 label 是 React node 時 search 用 children；用 filterOption 自定
-          filterOption={(input, option) => {
-            const v = option?.value as string | undefined;
-            const name = (v && irNameMap.get(v)) || v || '';
-            return name.toLowerCase().includes(input.toLowerCase());
-          }}
-        />
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {onlineCount} / {allDeviceIds.length} 台在線
-        </Text>
-        {lastUpdate && <Tag color="green">最後更新: {lastUpdate}</Tag>}
+      {/* 16 顆固定 TC 按鈕（M-PM-277：在線=綠, 離線=藍, 選中=金框） */}
+      <Space wrap style={{ marginBottom: 16 }}>
+        {tcButtons.map(({ num, deviceId, isOnline, isSelected }) => {
+          const label = `TC${String(num).padStart(2, '0')}`;
+          const bg = isOnline ? '#52c41a' : '#1677ff';
+          return (
+            <Button
+              key={num}
+              size="small"
+              onClick={() => deviceId && setSelectedDevice(deviceId)}
+              disabled={!deviceId}
+              style={{
+                backgroundColor: bg,
+                borderColor: isSelected ? '#faad14' : bg,
+                color: '#fff',
+                fontWeight: isSelected ? 700 : 400,
+                boxShadow: isSelected ? '0 0 0 2px #faad14' : undefined,
+                opacity: deviceId ? 1 : 0.35,
+                minWidth: 54,
+              }}
+            >
+              {label}
+            </Button>
+          );
+        })}
       </Space>
 
       {frame ? (
@@ -189,7 +170,7 @@ export default function ThermalView() {
       ) : (
         <Card>
           <div style={{ textAlign: 'center', padding: 48, color: '#999' }}>
-            {activeConnections === 0
+            {sseBaseUrls.length === 0
               ? '正在連接 Edge SSE...'
               : '等待 811C SSE 串流資料... (尚未收到對應 device 的 frame)'}
           </div>
