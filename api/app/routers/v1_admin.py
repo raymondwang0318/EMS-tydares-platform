@@ -1416,32 +1416,106 @@ async def list_electric_parameters(db: AsyncSession = Depends(get_db)):
 
 @router.get("/ir-devices")
 async def list_ir_devices(db: AsyncSession = Depends(get_db)):
-    """List all 811C IR devices with metadata.
+    """List all 811C IR devices with metadata (含 ip_address；M-P11-E36 兌現).
 
     Source: trx_reading DISTINCT device_id LIKE '811c_%' (V2-final per-device cutover)
-    + LEFT JOIN ems_ir_device_metadata for display_name.
+    + LEFT JOIN ems_ir_device_metadata for display_name + ip_address.
 
-    Returns: [{device_id, display_name (nullable), last_seen}]
+    Returns: [{device_id, display_name (nullable), ip_address (nullable), last_seen}]
+
+    ip_address 從 ems-ipscan container (arp-scan LAN broadcast) event-driven 寫入;
+    業主 0 操作;同 LAN 192.168.10.0/24 ICP DAS iSN-811C OUI 00:0d:e0:92:* filter.
     """
     result = await db.execute(text("""
         SELECT
           t.device_id,
           m.display_name,
+          m.ip_address,
           MAX(t.ts) AS last_seen
         FROM trx_reading t
         LEFT JOIN ems_ir_device_metadata m ON m.device_id = t.device_id
         WHERE t.device_id LIKE '811c_%'
-        GROUP BY t.device_id, m.display_name
+        GROUP BY t.device_id, m.display_name, m.ip_address
         ORDER BY t.device_id
     """))
     return [
         {
             "device_id": row[0],
             "display_name": row[1],
-            "last_seen": row[2].isoformat() if row[2] else None,
+            "ip_address": row[2],
+            "last_seen": row[3].isoformat() if row[3] else None,
         }
         for row in result.fetchall()
     ]
+
+
+# M-P11-E36 §2: ip-scan-report endpoint
+# ems-ipscan container (network_mode=host + arp-scan) bulk 上報 MAC→IP map
+# event-driven (新 MAC 進 trx_reading 觸發 / startup 一次補齊);業主 0 操作
+
+
+@router.post("/ir-devices/ip-scan-report")
+async def ip_scan_report(body: dict[str, Any] = Body(...), db: AsyncSession = Depends(get_db)):
+    """Bulk update ems_ir_device_metadata.ip_address from ARP scan results.
+
+    Body shape:
+        {
+          "scanned_at": "2026-05-27T13:30:00+08:00",
+          "devices": [
+            {"mac": "00:0d:e0:92:11:55", "ip": "192.168.10.83"},
+            {"mac": "00:0d:e0:92:14:40", "ip": "192.168.10.93"},
+            ...
+          ]
+        }
+
+    對齊 device_id naming: `811c_<mac:換-、lower>` (e.g. 811c_00-0d-e0-92-11-55)
+    UPSERT logic: 已存在 device_id → UPDATE ip_address;新 MAC → INSERT 含 ip_address.
+
+    回傳: { "updated": N, "inserted": N, "skipped": N }
+    """
+    scanned_devices = body.get("devices", [])
+    if not isinstance(scanned_devices, list):
+        raise HTTPException(status_code=400, detail="body.devices must be a list")
+
+    updated = 0
+    inserted = 0
+    skipped = 0
+
+    for entry in scanned_devices:
+        mac = entry.get("mac")
+        ip = entry.get("ip")
+        if not mac or not ip:
+            skipped += 1
+            continue
+
+        # MAC normalize: lowercase + colon→dash; device_id pattern: 811c_<mac>
+        mac_normalized = mac.lower().replace(":", "-")
+        device_id = f"811c_{mac_normalized}"
+
+        # UPSERT: 既存 device_id → UPDATE; 新 → INSERT (display_name=NULL 待業主編輯)
+        result = await db.execute(text("""
+            INSERT INTO ems_ir_device_metadata (device_id, ip_address, updated_at)
+            VALUES (:device_id, :ip, NOW())
+            ON CONFLICT (device_id) DO UPDATE
+            SET ip_address = EXCLUDED.ip_address,
+                updated_at = NOW()
+            RETURNING xmax = 0 AS inserted_flag
+        """), {"device_id": device_id, "ip": ip})
+        row = result.fetchone()
+        if row and row[0]:
+            inserted += 1
+        else:
+            updated += 1
+
+    await db.commit()
+
+    return {
+        "scanned_at": body.get("scanned_at"),
+        "total_received": len(scanned_devices),
+        "updated": updated,
+        "inserted": inserted,
+        "skipped": skipped,
+    }
 
 
 @router.put("/ir-devices/{device_id}/label")

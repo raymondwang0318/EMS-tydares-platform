@@ -1,0 +1,23 @@
+# M-P11-E36 ems-ipscan container
+# 用途: ICP DAS iSN-811C IR camera IP discovery via Linux arp-scan
+# 部署: network_mode=host (同 LAN 192.168.10.0/24);業主 0 操作 eSearch.exe
+FROM python:3.11-slim
+
+# arp-scan: Linux 標準 ARP scanner (Layer-2 MAC↔IP discovery)
+# iproute2: 提供 ip route / ip addr 採證用
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends arp-scan iproute2 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# 注意: docker-compose 使用 context=. (project root);所以 COPY path 從 root 起算
+COPY ./scripts/icpdas_ipscan.py /app/icpdas_ipscan.py
+RUN chmod +x /app/icpdas_ipscan.py
+
+# 預設 env (docker-compose 可覆寫)
+ENV ICPDAS_SUBNET=192.168.10.0/24 \
+    ICPDAS_OUI=00:0d:e0 \
+    EMS_API_URL=http://localhost:8000 \
+    SCAN_INTERVAL_SEC=300
+
+CMD ["python3", "/app/icpdas_ipscan.py"]

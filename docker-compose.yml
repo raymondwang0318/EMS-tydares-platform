@@ -70,5 +70,28 @@ services:
       - mosquitto-data:/mosquitto/data
     mem_limit: 128m
 
+  # M-P11-E36: ICP DAS iSN-811C IR camera IP scanner (arp-scan + filter OUI 00:0d:e0)
+  # network_mode=host 必要 (UDP/ARP broadcast 跨不過 Docker bridge);
+  # 與 ems-api / mosquitto 同 host network (Tydares 192.168.10.0/24 LAN);
+  # 業主 0 操作 eSearch.exe;底層自動掃 + 上報 ems-api ip-scan-report endpoint.
+  ipscan:
+    build:
+      context: .
+      dockerfile: ./api/Dockerfile.ipscan
+    container_name: ems-ipscan
+    restart: always
+    network_mode: host
+    environment:
+      - ICPDAS_SUBNET=192.168.10.0/24
+      - ICPDAS_OUI=00:0d:e0
+      - EMS_API_URL=http://localhost:8080
+      - SCAN_INTERVAL_SEC=3600
+    env_file:
+      - ./api/.env   # 從這拿 EMS_API_TOKEN
+    cap_add:
+      - NET_RAW       # arp-scan 需 CAP_NET_RAW
+      - NET_ADMIN
+    mem_limit: 64m
+
 volumes:
   mosquitto-data:
