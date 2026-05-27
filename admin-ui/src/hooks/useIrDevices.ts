@@ -18,6 +18,12 @@ export interface IrDevice {
   display_name: string | null;
   last_seen: string | null; // ISO 8601 UTC
   /**
+   * 811C 設備 LAN IP（從 811C UI 設定；只讀不編輯）。
+   * 後端 GET /admin/ir-devices 尚未提供此欄位 → undefined → UI 顯示「—」。
+   * P12A 擴充後端後此欄位自動填入。
+   */
+  ip_address?: string | null;
+  /**
    * 所屬 Edge ID。
    *
    * - M-PM-110 軌 A① schema migration 後 backend ir-devices SELECT 會回傳此欄位

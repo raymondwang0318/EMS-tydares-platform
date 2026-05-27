@@ -145,7 +145,10 @@ export default function IrDevices() {
       title: 'IP 地址',
       key: 'ip',
       width: 140,
-      render: () => <Text type="secondary">—</Text>,
+      render: (_, rec) =>
+        rec.ip_address
+          ? <Text style={{ fontFamily: 'monospace' }}>{rec.ip_address}</Text>
+          : <Text type="secondary">—</Text>,
     },
     {
       title: 'MAC',
