@@ -289,6 +289,9 @@ export default function ThermalView() {
             shift={frame.shift}
             summary={frame.summary}
           />
+          <div style={{ padding: '4px 10px', fontSize: 12, color: '#666', textAlign: 'right', borderTop: '1px solid #f0f0f0' }}>
+            最後更新：{(() => { try { return new Date(frame.timestamp).toLocaleString('zh-TW'); } catch { return frame.timestamp; } })()}
+          </div>
         </Card>
       ) : (
         <Card>
