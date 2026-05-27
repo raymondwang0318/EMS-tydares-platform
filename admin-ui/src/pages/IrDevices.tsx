@@ -1,18 +1,19 @@
 /**
- * IR (811C) 標籤管理頁 — 全站 IR 設備唯讀總覽 + 編輯 display_name。
+ * IR (811C) 標籤管理頁 — 全站 IR 設備唯讀總覽 + 分欄位編輯。
  *
  * T-S11C-001 AC 5（M-PM-074 P11 scope）：
  * - 不新增 / 不刪除（811C 不註冊 ems_device；新增由 trx_reading 派生）
- * - 編輯欄位只有 display_name
- * - 未命名 → 橘色警告「請填寫名稱代號以利辨識」
+ * - 編輯：TC 編號（Select）/ 安裝區域（Input）/ 安裝位置（Input）分開輸入
+ *   儲存時組合為 display_name：{區域}-{位置}-TC{num}
+ * - 未命名 → 橘色警告
  *
  * M-PM-277 UI 調整：
- * - 依 TC01~TC16 排列（display_name 尾部 TCxx 解析排序）
+ * - 依 TC01~TC16 排列
  * - 欄位：編號 / 安裝區域 / 安裝位置 / IP地址 / MAC / 最後上報時間 / 操作
  * - IP 地址欄位待後端擴充；目前顯示「—」
  */
 import { useState } from 'react';
-import { Alert, Button, Form, Input, Modal, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Form, Input, Modal, Select, Table, Tag, Typography, message } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -25,15 +26,14 @@ import {
 
 const { Title, Text } = Typography;
 
-// ─── display_name 解析 ───────────────────────────────────────────────
-// 預期格式：「{區域}-{位置}-TC{num}」，例：「D區-ML上-TC01」
-// 部分設備可能只有「TC01」（位置未設定）
+// ─── display_name 解析 ────────────────────────────────────────────────
+// 格式：「{區域}-{位置}-TC{num}」，例：「D區-ML上-TC01」
 
 interface ParsedName {
-  tcNum: number | null;  // 1~16，排序用
-  tcCode: string;        // "TC01"~"TC16"，或「—」
-  zone: string;          // "D區"
-  location: string;      // "ML上"
+  tcNum: number | null;
+  tcCode: string;
+  zone: string;
+  location: string;
 }
 
 function parseDisplayName(dn: string | null): ParsedName {
@@ -43,11 +43,9 @@ function parseDisplayName(dn: string | null): ParsedName {
   const tcNum = tcMatch ? parseInt(tcMatch[1], 10) : null;
   const tcCode = tcNum != null ? `TC${String(tcNum).padStart(2, '0')}` : '—';
 
-  // 去掉 "-TCxx" 後綴
   const base = dn.replace(/-?TC\d{1,2}$/i, '').trim();
   if (!base) return { tcNum, tcCode, zone: '—', location: '—' };
 
-  // 第一個 "-" 前為區域，其後為位置
   const dashIdx = base.indexOf('-');
   if (dashIdx === -1) return { tcNum, tcCode, zone: base, location: '—' };
 
@@ -59,12 +57,10 @@ function parseDisplayName(dn: string | null): ParsedName {
   };
 }
 
-// MAC 格式化：去掉 "811c_" 前綴
 function formatMac(deviceId: string): string {
   return deviceId.replace(/^811c_/i, '');
 }
 
-// ─── 排序：TC01 → TC16，未解析 TCxx 者排最後 ──────────────────────────
 function sortByTcNum(devices: IrDevice[]): IrDevice[] {
   return [...devices].sort((a, b) => {
     const na = parseDisplayName(a.display_name).tcNum;
@@ -76,28 +72,45 @@ function sortByTcNum(devices: IrDevice[]): IrDevice[] {
   });
 }
 
+// TC01~TC16 下拉選項
+const TC_OPTIONS = Array.from({ length: 16 }, (_, i) => {
+  const n = i + 1;
+  const code = `TC${String(n).padStart(2, '0')}`;
+  return { value: n, label: code };
+});
+
 // ─── Component ────────────────────────────────────────────────────────
+
+interface EditFormValues {
+  tc_num: number;
+  zone: string;
+  location: string;
+}
 
 export default function IrDevices() {
   const { data, isLoading, error } = useIrDevices();
   const upsert = useUpsertIrLabel();
   const [editing, setEditing] = useState<IrDevice | null>(null);
-  const [form] = Form.useForm<{ display_name: string }>();
+  const [form] = Form.useForm<EditFormValues>();
 
   const handleEdit = (rec: IrDevice) => {
     setEditing(rec);
-    form.setFieldsValue({ display_name: rec.display_name ?? '' });
+    const { tcNum, zone, location } = parseDisplayName(rec.display_name);
+    form.setFieldsValue({
+      tc_num: tcNum ?? undefined,
+      zone: zone === '—' ? '' : zone,
+      location: location === '—' ? '' : location,
+    });
   };
 
   const handleSave = async () => {
     try {
       const values = await form.validateFields();
       if (!editing) return;
-      await upsert.mutateAsync({
-        device_id: editing.device_id,
-        display_name: values.display_name.trim(),
-      });
-      message.success('已更新名稱代號');
+      const padded = String(values.tc_num).padStart(2, '0');
+      const display_name = `${values.zone.trim()}-${values.location.trim()}-TC${padded}`;
+      await upsert.mutateAsync({ device_id: editing.device_id, display_name });
+      message.success('已更新');
       setEditing(null);
     } catch (e: any) {
       if (e?.errorFields) return;
@@ -123,22 +136,16 @@ export default function IrDevices() {
       width: 110,
       render: (_, rec) => {
         const { zone } = parseDisplayName(rec.display_name);
-        return zone === '—'
-          ? <Text type="secondary">—</Text>
-          : <span>{zone}</span>;
+        return zone === '—' ? <Text type="secondary">—</Text> : <span>{zone}</span>;
       },
     },
     {
       title: '安裝位置',
       key: 'location',
       render: (_, rec) => {
-        if (isIrUnnamed(rec)) {
-          return <Tag color="orange">⚠ 未命名 — 請填寫名稱代號以利辨識</Tag>;
-        }
+        if (isIrUnnamed(rec)) return <Tag color="orange">⚠ 未命名</Tag>;
         const { location } = parseDisplayName(rec.display_name);
-        return location === '—'
-          ? <Text type="secondary">—</Text>
-          : <span>{location}</span>;
+        return location === '—' ? <Text type="secondary">—</Text> : <span>{location}</span>;
       },
     },
     {
@@ -172,19 +179,17 @@ export default function IrDevices() {
     {
       title: '操作',
       key: 'actions',
-      width: 90,
+      width: 80,
       render: (_, rec) => (
         <Button
           icon={<EditOutlined />}
           size="small"
           onClick={() => handleEdit(rec)}
-          aria-label="編輯名稱代號"
+          aria-label="編輯"
         />
       ),
     },
   ];
-
-  const sortedData = sortByTcNum(data ?? []);
 
   return (
     <div>
@@ -196,7 +201,7 @@ export default function IrDevices() {
         showIcon
         style={{ marginBottom: 16 }}
         message="811C 熱像 IR 設備清單（從 trx_reading 派生 — 不註冊主設備表）"
-        description="填寫名稱代號（display_name）即納入健康監控；未命名設備不觸發離線告警（ADR-028 DR-028-02）。MAC 僅作系統識別用，不出現在報表前台。IP 地址欄位待後端版本擴充。"
+        description="設定編號 / 安裝區域 / 安裝位置即納入健康監控；未命名設備不觸發離線告警。IP 地址待後端版本擴充。"
       />
       {error && (
         <Alert
@@ -210,16 +215,15 @@ export default function IrDevices() {
       <Table<IrDevice>
         rowKey="device_id"
         columns={columns}
-        dataSource={sortedData}
+        dataSource={sortByTcNum(data ?? [])}
         loading={isLoading}
         size="middle"
         pagination={{ pageSize: 20 }}
-        locale={{ emptyText: 'trx_reading 尚無 811c_* 資料；待 Edge 採集累積或老王連網更多 IR 設備' }}
+        locale={{ emptyText: 'trx_reading 尚無 811c_* 資料；待 Edge 採集後自動出現' }}
       />
 
-      {/* 編輯 display_name Modal — 追加 / 修改 811C 安裝位置標籤 */}
       <Modal
-        title={`編輯名稱代號：${editing?.device_id ?? ''}`}
+        title={`設定安裝資訊 — ${editing?.device_id ?? ''}`}
         open={!!editing}
         onOk={handleSave}
         onCancel={() => setEditing(null)}
@@ -230,15 +234,35 @@ export default function IrDevices() {
       >
         <Form form={form} layout="vertical" preserve={false}>
           <Form.Item
-            name="display_name"
-            label="名稱代號"
-            rules={[
-              { required: true, message: '請輸入名稱代號' },
-              { max: 100, message: '不超過 100 字' },
-            ]}
-            extra="格式：{區域}-{位置}-TC{編號}，例：D區-ML上-TC01 / E區-TR1-100-TC08"
+            name="tc_num"
+            label="TC 編號"
+            rules={[{ required: true, message: '請選擇 TC 編號' }]}
           >
-            <Input placeholder="例：D區-ML上-TC01" autoFocus />
+            <Select
+              options={TC_OPTIONS}
+              placeholder="選擇 TC01 ~ TC16"
+              style={{ width: 160 }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="zone"
+            label="安裝區域"
+            rules={[
+              { required: true, message: '請輸入安裝區域' },
+              { max: 30, message: '不超過 30 字' },
+            ]}
+          >
+            <Input placeholder="例：D區" autoFocus />
+          </Form.Item>
+          <Form.Item
+            name="location"
+            label="安裝位置"
+            rules={[
+              { required: true, message: '請輸入安裝位置' },
+              { max: 50, message: '不超過 50 字' },
+            ]}
+          >
+            <Input placeholder="例：ML上 / TR1-100 / TR3-50(下)" />
           </Form.Item>
         </Form>
       </Modal>
