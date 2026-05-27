@@ -11,9 +11,11 @@
  *   - 移除在線狀態 / 最後更新時間顯示
  *   - 下拉選單 → 4×4 固定按鈕格 TC01~TC16（含安裝位置名稱）
  *   - 在線=綠色, 離線=藍色（15s 無 frame = 離線）, 選中=金色外框
- *   - 斷線後保留最後一張：
- *     - _frameCache：模組層級快取，component unmount/remount 不清除
- *     - frames state：優先，初始化從快取載入
+ *   - 斷線後保留最後一張（三層快取）：
+ *     - sessionStorage：跨 hard reload 持久化；QuotaExceededError 靜默忽略
+ *     - _frameCache：模組層級快取，component unmount/remount 不清除；
+ *       module 載入時從 sessionStorage 恢復
+ *     - frames state：優先，初始化從 _frameCache 載入
  *     - 顯示時 fallback → _frameCache（解決 state 重置導致白底問題）
  */
 import { useEffect, useState, useCallback, useMemo } from 'react';
@@ -32,6 +34,10 @@ const COLS = 4;
 
 /** 超過此時間（ms）未收到 frame → 視為離線（按鈕轉藍） */
 const ONLINE_STALE_MS = 15_000;
+
+/** sessionStorage 鍵前綴 — 持久化各設備最後一張 frame，跨 hard reload */
+const SS_PREFIX = 'thermal_frame_';
+const SS_SELECTED = 'thermal_selected';
 
 type FrameState = {
   deviceId: string;
@@ -58,12 +64,42 @@ type TcButtonData = {
  * component unmount/remount（頁面切換）時 React state 會清空；
  * 模組層級變數在 JS module 生命週期內不清除。
  * 下次 mount 時以此快取初始化 state，確保畫面不白底。
+ *
+ * module 載入時從 sessionStorage 恢復，確保 hard reload 後仍能顯示最後一張。
  */
 const _frameCache: Record<string, FrameState> = {};
 let _lastSelected: string | undefined;
 
+// module 載入時立即從 sessionStorage 恢復 — 確保 hard reload 後畫面不白底
+;(function restoreFromStorage() {
+  try {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key?.startsWith(SS_PREFIX)) {
+        const raw = sessionStorage.getItem(key);
+        if (raw) {
+          const state = JSON.parse(raw) as FrameState;
+          _frameCache[key.slice(SS_PREFIX.length)] = state;
+        }
+      }
+    }
+    _lastSelected = sessionStorage.getItem(SS_SELECTED) ?? undefined;
+  } catch {
+    // sessionStorage 不可用（私密模式 / 容量超限）— 靜默忽略
+  }
+})();
+
+/** 將單一設備的 frame 寫入 sessionStorage（QuotaExceededError 靜默忽略） */
+function saveFrameToStorage(deviceId: string, state: FrameState): void {
+  try {
+    sessionStorage.setItem(`${SS_PREFIX}${deviceId}`, JSON.stringify(state));
+  } catch {
+    // QuotaExceededError — 靜默忽略，不影響 runtime 功能
+  }
+}
+
 export default function ThermalView() {
-  // 初始化從模組快取載入（保留最後一張畫面）
+  // 初始化從模組快取載入（保留最後一張畫面；_frameCache 已在 module 載入時從 sessionStorage 恢復）
   const [frames, setFrames] = useState<Record<string, FrameState>>(() => ({ ..._frameCache }));
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>(() => _lastSelected);
   // 每 5s tick 一次：重算 isOnline（ONLINE_STALE_MS 過期判斷）
@@ -108,12 +144,14 @@ export default function ThermalView() {
         receivedAt: Date.now(),
       };
 
-      // 先寫模組快取，再更新 React state
+      // 先寫模組快取 + sessionStorage，再更新 React state
       _frameCache[sseFrame.device_id] = state;
+      saveFrameToStorage(sseFrame.device_id, state);
       setFrames((prev) => ({ ...prev, [sseFrame.device_id]: state }));
       setSelectedDevice((prev) => {
         const next = prev ?? sseFrame.device_id;
         _lastSelected = next;
+        try { sessionStorage.setItem(SS_SELECTED, next); } catch { /* 靜默忽略 */ }
         return next;
       });
     },
@@ -181,7 +219,7 @@ export default function ThermalView() {
           gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
           gap: 8,
           marginBottom: 16,
-          width: '80%',
+          width: '60%',
         }}
       >
         {tcButtons.map(({ num, deviceId, location, isOnline, isSelected }) => {
@@ -194,6 +232,7 @@ export default function ThermalView() {
               onClick={() => {
                 if (deviceId) {
                   _lastSelected = deviceId;
+                  try { sessionStorage.setItem(SS_SELECTED, deviceId); } catch { /* 靜默忽略 */ }
                   setSelectedDevice(deviceId);
                 }
               }}
@@ -222,11 +261,11 @@ export default function ThermalView() {
                   gap: 2,
                 }}
               >
-                <span style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</span>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>{tcCode}</span>
                 {location && (
                   <span
                     style={{
-                      fontSize: 11,
+                      fontSize: 12,
                       opacity: 0.92,
                       whiteSpace: 'normal',
                       wordBreak: 'break-all',
