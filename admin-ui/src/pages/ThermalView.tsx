@@ -212,10 +212,11 @@ export default function ThermalView() {
                 wordBreak: 'break-all',
               }}
             >
-              <div style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</div>
+              <span style={{ display: 'block', fontWeight: 700, fontSize: 13 }}>{tcCode}</span>
               {location && (
-                <div
+                <span
                   style={{
+                    display: 'block',
                     fontSize: 11,
                     opacity: 0.92,
                     marginTop: 2,
@@ -224,7 +225,7 @@ export default function ThermalView() {
                   }}
                 >
                   {location}
-                </div>
+                </span>
               )}
             </Button>
           );
