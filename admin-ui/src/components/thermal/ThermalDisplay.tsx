@@ -97,17 +97,17 @@ export function ThermalDisplay(props: ThermalDisplayProps) {
 
   return (
     <div>
-      <canvas ref={canvasRef} style={{ width: '100%', maxWidth: 480, display: 'block' }} />
-      <div style={{ maxWidth: 480 }}>
+      <canvas ref={canvasRef} style={{ width: '100%', maxWidth: 672, display: 'block' }} />
+      <div style={{ maxWidth: 672 }}>
         <div
           style={{
             display: 'flex',
             justifyContent: 'space-between',
-            padding: '6px 8px',
+            padding: '8px 11px',
             background: '#1a1a2e',
             fontFamily: 'monospace',
             fontWeight: 'bold',
-            fontSize: 13,
+            fontSize: 18,
           }}
         >
           <span style={{ color: '#fff' }}>MIN {summary.min_temp.toFixed(1)}°C</span>
@@ -116,8 +116,8 @@ export function ThermalDisplay(props: ThermalDisplayProps) {
             MAX {summary.max_temp.toFixed(1)}°C
           </span>
         </div>
-        <canvas ref={barRef} style={{ width: '100%', height: 14, display: 'block' }} />
-        <div style={{ height: 6, background: '#1a1a2e' }} />
+        <canvas ref={barRef} style={{ width: '100%', height: 19, display: 'block' }} />
+        <div style={{ height: 8, background: '#1a1a2e' }} />
       </div>
     </div>
   );

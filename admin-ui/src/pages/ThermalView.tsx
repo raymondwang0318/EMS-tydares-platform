@@ -217,9 +217,9 @@ export default function ThermalView() {
         style={{
           display: 'grid',
           gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))`,
-          gap: 8,
+          gap: 11,
           marginBottom: 16,
-          width: '60%',
+          width: '48%',
         }}
       >
         {tcButtons.map(({ num, deviceId, location, isOnline, isSelected }) => {
@@ -244,7 +244,7 @@ export default function ThermalView() {
                 boxShadow: isSelected ? '0 0 0 2px #faad14' : undefined,
                 opacity: deviceId ? 1 : 0.35,
                 height: 'auto',
-                padding: '6px 8px',
+                padding: '8px 11px',
                 textAlign: 'center',
                 lineHeight: 1.3,
                 whiteSpace: 'normal',
@@ -261,11 +261,11 @@ export default function ThermalView() {
                   gap: 2,
                 }}
               >
-                <span style={{ fontWeight: 700, fontSize: 14 }}>{tcCode}</span>
+                <span style={{ fontWeight: 700, fontSize: 18 }}>{tcCode}</span>
                 {location && (
                   <span
                     style={{
-                      fontSize: 12,
+                      fontSize: 14,
                       opacity: 0.92,
                       whiteSpace: 'normal',
                       wordBreak: 'break-all',
