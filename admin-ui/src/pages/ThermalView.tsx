@@ -7,17 +7,14 @@
  *   - 「811C 不要綁死在某一顆 Edge 上面」 — IR 設備可漂移，UI 不認 edge_id
  *   - 「存活判定認 MAC + 安裝位置標籤」 — device_id（MAC）為主鍵，display_name 為人讀
  *
- * 實作（multi-edge fan-in）：
- *   - useEdges() 列所有 active edges → 對每顆 Edge 直連 SSE（CORS ACAO=* 已驗）
- *   - 多 SSE 同時聚合 frame；以 device_id 為索引
- *   - 不顯示 Edge 來源；16 顆固定按鈕 TC01~TC16（M-PM-277）
- *
- * M-PM-277 調整（含 §二次迭代）：
+ * M-PM-277 調整：
  *   - 移除在線狀態 / 最後更新時間顯示
- *   - 下拉選單 → 4×4 固定按鈕格 TC01~TC16
- *   - 按鈕帶入 IR 標籤管理設定的安裝位置名稱（display_name 去除 -TCxx 後綴）
- *   - 在線=綠色, 離線=藍色, 選中=金色外框
- *   - 斷線後保留最後一張畫面（frames state 不清除）
+ *   - 下拉選單 → 4×4 固定按鈕格 TC01~TC16（含安裝位置名稱）
+ *   - 在線=綠色, 離線=藍色（15s 無 frame = 離線）, 選中=金色外框
+ *   - 斷線後保留最後一張：
+ *     - _frameCache：模組層級快取，component unmount/remount 不清除
+ *     - frames state：優先，初始化從快取載入
+ *     - 顯示時 fallback → _frameCache（解決 state 重置導致白底問題）
  */
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { Button, Card, Spin, Typography } from 'antd';
@@ -31,7 +28,10 @@ import { useEdges } from '../hooks/useEdges';
 const { Title } = Typography;
 
 const TC_COUNT = 16;
-const COLS = 4; // 4 欄 × 4 列
+const COLS = 4;
+
+/** 超過此時間（ms）未收到 frame → 視為離線（按鈕轉藍） */
+const ONLINE_STALE_MS = 15_000;
 
 type FrameState = {
   deviceId: string;
@@ -40,28 +40,39 @@ type FrameState = {
   irdata: string;
   shift: string;
   summary: ThermalSummary;
+  /** 收到此 frame 的本機時間（Date.now()）；用於在線狀態判斷 */
+  receivedAt: number;
 };
 
 type TcButtonData = {
   num: number;
   deviceId: string | undefined;
-  location: string; // display_name 去除 -TCxx 後綴（供操作人員辨識安裝場所）
+  location: string;
   isOnline: boolean;
   isSelected: boolean;
 };
 
+/**
+ * 模組層級 frame 快取 — 對抗 React state 重置
+ *
+ * component unmount/remount（頁面切換）時 React state 會清空；
+ * 模組層級變數在 JS module 生命週期內不清除。
+ * 下次 mount 時以此快取初始化 state，確保畫面不白底。
+ */
+const _frameCache: Record<string, FrameState> = {};
+let _lastSelected: string | undefined;
+
 export default function ThermalView() {
-  const [frames, setFrames] = useState<Record<string, FrameState>>({});
-  const [selectedDevice, setSelectedDevice] = useState<string | undefined>();
+  // 初始化從模組快取載入（保留最後一張畫面）
+  const [frames, setFrames] = useState<Record<string, FrameState>>(() => ({ ..._frameCache }));
+  const [selectedDevice, setSelectedDevice] = useState<string | undefined>(() => _lastSelected);
+  // 每 5s tick 一次：重算 isOnline（ONLINE_STALE_MS 過期判斷）
+  const [, setTick] = useState(0);
 
   const { data: irDevicesData } = useIrDevices();
   const { data: edgesData } = useEdges();
 
-  /**
-   * TC 編號 → { deviceId, location } 對應表
-   * display_name 後綴規則：…-TC01 / …-TC16 等
-   * location = display_name 去除 -TCxx 後綴，作為操作人員辨識安裝場所的名稱
-   */
+  /** TC 編號 → { deviceId, location } */
   const tcToInfo = useMemo(() => {
     const m = new Map<number, { deviceId: string; location: string }>();
     (irDevicesData ?? []).forEach((d) => {
@@ -76,7 +87,6 @@ export default function ThermalView() {
     return m;
   }, [irDevicesData]);
 
-  // M-PM-158 multi-edge fan-in：所有 active edges 的 SSE base URL
   const sseBaseUrls = useMemo(() => {
     const active = (edgesData ?? []).filter(
       (e) => (e.status === 'approved' || e.status === 'maintenance') && e.last_seen_ip,
@@ -95,11 +105,17 @@ export default function ThermalView() {
         irdata: sseFrame.irdata,
         shift: sseFrame.shift || '0,0',
         summary: computeSummary(normalizeIrdata(sseFrame.irdata)),
+        receivedAt: Date.now(),
       };
 
-      // 斷線後保留最後一張：frames 只增不清（M-PM-277）
+      // 先寫模組快取，再更新 React state
+      _frameCache[sseFrame.device_id] = state;
       setFrames((prev) => ({ ...prev, [sseFrame.device_id]: state }));
-      setSelectedDevice((prev) => prev || sseFrame.device_id);
+      setSelectedDevice((prev) => {
+        const next = prev ?? sseFrame.device_id;
+        _lastSelected = next;
+        return next;
+      });
     },
     [],
   );
@@ -114,9 +130,14 @@ export default function ThermalView() {
     };
   }, [sseBaseUrls, handleFrame]);
 
-  /**
-   * 16 顆按鈕資料，4 欄排列
-   */
+  // 每 5s 重算 isOnline（ONLINE_STALE_MS 判斷）
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const now = Date.now();
+
   const tcButtons = useMemo<TcButtonData[]>(
     () =>
       Array.from({ length: TC_COUNT }, (_, i) => {
@@ -124,14 +145,26 @@ export default function ThermalView() {
         const info = tcToInfo.get(num);
         const deviceId = info?.deviceId;
         const location = info?.location ?? '';
-        const isOnline = !!deviceId && !!frames[deviceId];
+        // 在線判斷：React state 中有 frame 且 receivedAt 未超過 ONLINE_STALE_MS
+        const isOnline =
+          !!deviceId &&
+          !!frames[deviceId] &&
+          now - frames[deviceId]!.receivedAt < ONLINE_STALE_MS;
         const isSelected = !!deviceId && selectedDevice === deviceId;
         return { num, deviceId, location, isOnline, isSelected };
       }),
-    [tcToInfo, frames, selectedDevice],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tcToInfo, frames, selectedDevice, now],
   );
 
-  const frame = selectedDevice ? frames[selectedDevice] : null;
+  /**
+   * 顯示 frame：
+   *   1. React state（最新）
+   *   2. 模組快取（fallback — 對抗 state 重置，保留最後一張）
+   */
+  const frame = selectedDevice
+    ? (frames[selectedDevice] ?? _frameCache[selectedDevice] ?? null)
+    : null;
 
   return (
     <Spin spinning={false}>
@@ -141,7 +174,7 @@ export default function ThermalView() {
         </Title>
       </div>
 
-      {/* 4×4 固定按鈕格（M-PM-277：在線=綠, 離線=藍, 選中=金框；含安裝位置名稱） */}
+      {/* 4×4 固定按鈕格（在線=綠, 離線=藍, 選中=金框；含安裝位置名稱） */}
       <div
         style={{
           display: 'grid',
@@ -157,7 +190,12 @@ export default function ThermalView() {
             <Button
               key={num}
               block
-              onClick={() => deviceId && setSelectedDevice(deviceId)}
+              onClick={() => {
+                if (deviceId) {
+                  _lastSelected = deviceId;
+                  setSelectedDevice(deviceId);
+                }
+              }}
               disabled={!deviceId}
               style={{
                 backgroundColor: bg,
@@ -171,10 +209,17 @@ export default function ThermalView() {
                 lineHeight: 1.3,
               }}
             >
-              {/* TC 編號（粗體）+ 安裝位置名稱（小字） */}
               <div style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</div>
               {location && (
-                <div style={{ fontSize: 11, opacity: 0.92, marginTop: 2, whiteSpace: 'normal', wordBreak: 'break-all' }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    opacity: 0.92,
+                    marginTop: 2,
+                    whiteSpace: 'normal',
+                    wordBreak: 'break-all',
+                  }}
+                >
                   {location}
                 </div>
               )}
