@@ -212,21 +212,31 @@ export default function ThermalView() {
                 wordBreak: 'break-all',
               }}
             >
-              <span style={{ display: 'block', fontWeight: 700, fontSize: 13 }}>{tcCode}</span>
-              {location && (
-                <span
-                  style={{
-                    display: 'block',
-                    fontSize: 11,
-                    opacity: 0.92,
-                    marginTop: 2,
-                    whiteSpace: 'normal',
-                    wordBreak: 'break-all',
-                  }}
-                >
-                  {location}
-                </span>
-              )}
+              {/* flex column wrapper — 強制 TC 編號與位置名稱各占一行 */}
+              <span
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  width: '100%',
+                  gap: 2,
+                }}
+              >
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{tcCode}</span>
+                {location && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      opacity: 0.92,
+                      whiteSpace: 'normal',
+                      wordBreak: 'break-all',
+                      textAlign: 'center',
+                    }}
+                  >
+                    {location}
+                  </span>
+                )}
+              </span>
             </Button>
           );
         })}
