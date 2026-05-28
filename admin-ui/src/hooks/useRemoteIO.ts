@@ -167,23 +167,29 @@ export function useFanStatus(edge_id: string, fan_type: FanType, fan_index: numb
       }
       const mapping = getFanChannelMapping(fan_type, fan_index);
       const deviceId = `tcs300b03-${edge_id}-DI${mapping.slave_di}`;
-      const r = await api.get<DeviceStatusResponse>(
-        `/admin/io/devices/${encodeURIComponent(deviceId)}/status`,
-      );
-      const { channels, data_source } = r.data;
-      if (data_source === 'pending_ingest' || !channels) {
-        return null; // DI ingest pipeline 尚未補齊 → FanCard 顯示「DI 待 ingest」
+      try {
+        const r = await api.get<DeviceStatusResponse>(
+          `/admin/io/devices/${encodeURIComponent(deviceId)}/status`,
+        );
+        const { channels, data_source } = r.data;
+        if (data_source === 'pending_ingest' || !channels) {
+          return null; // DI ingest pipeline 尚未補齊 → FanCard 顯示「DI 待 ingest」
+        }
+        // 對映 di_channel_base → FanStatus（手動/自動/運轉/過載）
+        const base = mapping.di_channel_base; // 1-based
+        const getState = (ch: number) => channels.find((c) => c.channel === ch)?.state === 1;
+        return {
+          manual: getState(base),
+          auto: getState(base + 1),
+          running: getState(base + 2),
+          overload: getState(base + 3),
+          do_state: false, // DO state 需獨立查 DO device；Phase B 暫不實作（ingest 補齊後統一）
+        };
+      } catch (err: any) {
+        // 404：device 尚未在 DB 建立 → 視同 pending_ingest（DO 控制仍可用）
+        if (err?.response?.status === 404) return null;
+        throw err; // 其他錯誤繼續往上拋
       }
-      // 對映 di_channel_base → FanStatus（手動/自動/運轉/過載）
-      const base = mapping.di_channel_base; // 1-based
-      const getState = (ch: number) => channels.find((c) => c.channel === ch)?.state === 1;
-      return {
-        manual: getState(base),
-        auto: getState(base + 1),
-        running: getState(base + 2),
-        overload: getState(base + 3),
-        do_state: false, // DO state 需獨立查 DO device；Phase B 暫不實作（ingest 補齊後統一）
-      };
     },
     refetchInterval: 5000,
     staleTime: 1000,

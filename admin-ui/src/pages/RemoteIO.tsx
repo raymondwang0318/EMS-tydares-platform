@@ -171,8 +171,40 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
     );
   }
 
-  // status === undefined：query 尚未完成（不應出現；isLoading 應已攔截）
-  if (!status) return null;
+  // status === undefined：query error（非 404）→ 與 pending_ingest 同樣顯示 DO 操作卡
+  if (!status) {
+    return (
+      <Card
+        size="small"
+        style={{ minHeight: 180 }}
+        title={<Space size={6}><Text strong>{fan_name}</Text></Space>}
+        extra={<ExclamationCircleOutlined style={{ color: '#d4b106', fontSize: 16 }} />}
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            DI 狀態待 ingest（trx_io_reading）
+          </Text>
+          <Button
+            type="primary"
+            block
+            icon={<PlayCircleOutlined />}
+            loading={doControl.isPending}
+            onClick={() => handleDOControl(true)}
+          >
+            DO 啟動
+          </Button>
+          <Button
+            block
+            icon={<StopOutlined />}
+            loading={doControl.isPending}
+            onClick={() => handleDOControl(false)}
+          >
+            DO 停止
+          </Button>
+        </Space>
+      </Card>
+    );
+  }
 
   const ModeIcon = mode === 'overload'
     ? WarningOutlined
