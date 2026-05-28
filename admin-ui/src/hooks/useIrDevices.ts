@@ -90,6 +90,27 @@ export function useUpsertIrLabel() {
 }
 
 /**
+ * Soft archive IR device（M-P12-077；老王 5/28「移除已取消安裝的 811C」）。
+ *
+ * DELETE /v1/admin/ir-devices/{device_id} → 設 archived_at；
+ * 歷史 trx_reading 保留；列表隱藏（重裝同 MAC 又上報自動復活）。
+ */
+export function useArchiveIrDevice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (device_id: string) => {
+      const r = await api.delete<{ device_id: string; archived_at: string; status: string }>(
+        `/admin/ir-devices/${encodeURIComponent(device_id)}`,
+      );
+      return r.data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: IR_DEVICES_KEY });
+    },
+  });
+}
+
+/**
  * IR 設備顯示名稱優先序（M-PM-074 §4.2 / T-S11C-001 AC 6）：
  *   1. display_name 不為 null/空字串 → 直接顯示
  *   2. 否則 → 「未命名 IR-{idx + 1}」（橘色提示由 caller 處理）

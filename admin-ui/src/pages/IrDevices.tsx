@@ -13,13 +13,14 @@
  * - IP 地址欄位待後端擴充；目前顯示「—」
  */
 import { useState } from 'react';
-import { Alert, Button, Form, Input, Modal, Select, Table, Tag, Typography, message } from 'antd';
-import { EditOutlined } from '@ant-design/icons';
+import { Alert, Button, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import {
   useIrDevices,
   useUpsertIrLabel,
+  useArchiveIrDevice,
   isIrUnnamed,
   type IrDevice,
 } from '../hooks/useIrDevices';
@@ -108,8 +109,40 @@ interface EditFormValues {
 export default function IrDevices() {
   const { data, isLoading, error } = useIrDevices();
   const upsert = useUpsertIrLabel();
+  const archive = useArchiveIrDevice();
   const [editing, setEditing] = useState<IrDevice | null>(null);
   const [form] = Form.useForm<EditFormValues>();
+
+  // M-P12-077 老王 5/28：移除已取消安裝的 811C（soft archive；二次確認 v1.4 §61）
+  const handleArchive = (rec: IrDevice) => {
+    const { tcCode, zone, location } = parseDisplayName(rec.display_name);
+    const label = tcCode !== '—' ? `${tcCode}（${zone}-${location}）` : rec.device_id;
+    Modal.confirm({
+      title: '移除 IR 設備',
+      okText: '確定移除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      content: (
+        <div>
+          <p>確定移除 <strong>{label}</strong>？</p>
+          <p style={{ color: '#888', fontSize: 13 }}>
+            MAC: {formatMac(rec.device_id)}<br />
+            歷史熱像資料保留；僅從列表隱藏。<br />
+            若日後重新安裝同一顆（同 MAC）並重新上報，會自動復原顯示。
+          </p>
+        </div>
+      ),
+      onOk: async () => {
+        try {
+          await archive.mutateAsync(rec.device_id);
+          message.success('已移除');
+        } catch (e: any) {
+          message.error(`移除失敗：${e?.response?.data?.detail ?? e?.message ?? '未知錯誤'}`);
+          throw e; // 保持 Modal 開啟
+        }
+      },
+    });
+  };
 
   const handleEdit = (rec: IrDevice) => {
     setEditing(rec);
@@ -157,7 +190,7 @@ export default function IrDevices() {
     {
       title: '安裝區域',
       key: 'zone',
-      width: 80,
+      width: 120,
       render: (_, rec) => {
         if (isEmptySlot(rec)) return EMPTY;
         const { zone } = parseDisplayName(rec.display_name);
@@ -206,24 +239,33 @@ export default function IrDevices() {
     {
       title: '操作',
       key: 'actions',
-      width: 70,
+      width: 110,
       render: (_, rec) =>
         isEmptySlot(rec)
           ? EMPTY
           : (
-            <Button
-              icon={<EditOutlined />}
-              size="small"
-              onClick={() => handleEdit(rec)}
-              aria-label="編輯"
-            />
+            <Space size="small">
+              <Button
+                icon={<EditOutlined />}
+                size="small"
+                onClick={() => handleEdit(rec)}
+                aria-label="編輯"
+              />
+              <Button
+                icon={<DeleteOutlined />}
+                size="small"
+                danger
+                onClick={() => handleArchive(rec)}
+                aria-label="移除"
+              />
+            </Space>
           ),
     },
   ];
 
   // M-P11-E36 老王 5/28 明示：欄位向左縮、不撐滿整頁
-  // columns 總寬 = 70+80+200+130+160+170+70 = 880;外層 maxWidth 限制 table 不 stretch 全畫面
-  const TABLE_MAX_WIDTH = 900;
+  // columns 總寬 = 70+120+200+130+160+170+110 = 960（操作欄加刪除按鈕 70→110）;外層 maxWidth 限制 table 不 stretch
+  const TABLE_MAX_WIDTH = 980;
 
   return (
     <div>

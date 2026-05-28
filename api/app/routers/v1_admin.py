@@ -259,6 +259,7 @@ _DEVICE_KIND_MAP = {
     "cpm23": "modbus_meter",
     "aem_drb": "modbus_meter",
     "tcs300b03": "modbus_meter",
+    "tcs300b04": "modbus_meter",   # M-P10D-017/018 2026-05-28: DO driver 補入
 }
 
 
@@ -1426,16 +1427,22 @@ async def list_ir_devices(db: AsyncSession = Depends(get_db)):
     ip_address 從 ems-ipscan container (arp-scan LAN broadcast) event-driven 寫入;
     業主 0 操作;同 LAN 192.168.10.0/24 ICP DAS iSN-811C OUI 00:0d:e0:92:* filter.
     """
+    # M-P12-077 soft archive: 拆除設備 filter 掉
+    #   archived_at IS NULL → 未封存;正常顯示
+    #   last_seen > archived_at → 封存後又上報 (重裝同 MAC) → 自動復活顯示
+    #   archived_at >= last_seen → 封存後無新上報 → 隱藏 (拆除設備)
     result = await db.execute(text("""
         SELECT
           t.device_id,
           m.display_name,
           m.ip_address,
-          MAX(t.ts) AS last_seen
+          MAX(t.ts) AS last_seen,
+          m.archived_at
         FROM trx_reading t
         LEFT JOIN ems_ir_device_metadata m ON m.device_id = t.device_id
         WHERE t.device_id LIKE '811c_%'
-        GROUP BY t.device_id, m.display_name, m.ip_address
+        GROUP BY t.device_id, m.display_name, m.ip_address, m.archived_at
+        HAVING m.archived_at IS NULL OR MAX(t.ts) > m.archived_at
         ORDER BY t.device_id
     """))
     return [
@@ -1561,4 +1568,51 @@ async def upsert_ir_label(
         "device_id": row[0],
         "display_name": row[1],
         "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+# M-P12-077: IR device soft archive（老王 5/28 明示「移除已取消安裝的 811C」）
+# 不刪 trx_reading 歷史（熱像資料保留）;只設 ems_ir_device_metadata.archived_at;
+# GET /ir-devices filter archived_at >= last_seen 的隱藏;重裝同 MAC 又上報自動復活
+
+
+@router.delete("/ir-devices/{device_id}")
+async def archive_ir_device(device_id: str, db: AsyncSession = Depends(get_db)):
+    """Soft archive IR device (拆除設備從列表隱藏;歷史 trx_reading 保留).
+
+    UPSERT ems_ir_device_metadata.archived_at = NOW().
+    device 可能無 metadata row（未命名）→ INSERT；既存 → UPDATE.
+
+    Returns: { device_id, archived_at, status }
+    """
+    if not device_id.startswith("811c_"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"device_id must start with '811c_'; got: {device_id}"
+        )
+
+    result = await db.execute(text("""
+        INSERT INTO ems_ir_device_metadata (device_id, archived_at, updated_at)
+        VALUES (:device_id, NOW(), NOW())
+        ON CONFLICT (device_id) DO UPDATE
+        SET archived_at = NOW(),
+            updated_at = NOW()
+        RETURNING archived_at
+    """), {"device_id": device_id})
+    row = result.fetchone()
+    await db.commit()
+
+    db.add(EmsEvent(
+        event_kind="operation",
+        severity="info",
+        device_id=device_id,
+        actor="admin",
+        message=f"IR device archived (拆除設備列表隱藏): {device_id}",
+    ))
+    await db.commit()
+
+    return {
+        "device_id": device_id,
+        "archived_at": row[0].isoformat() if row and row[0] else None,
+        "status": "archived",
     }
