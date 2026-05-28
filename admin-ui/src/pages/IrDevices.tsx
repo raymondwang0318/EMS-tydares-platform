@@ -61,15 +61,33 @@ function formatMac(deviceId: string): string {
   return deviceId.replace(/^811c_/i, '');
 }
 
-function sortByTcNum(devices: IrDevice[]): IrDevice[] {
-  return [...devices].sort((a, b) => {
-    const na = parseDisplayName(a.display_name).tcNum;
-    const nb = parseDisplayName(b.display_name).tcNum;
-    if (na == null && nb == null) return 0;
-    if (na == null) return 1;
-    if (nb == null) return -1;
-    return na - nb;
-  });
+// 空 TC slot（老王 5/28：編號固定列 TC01~TC16，無內容留空）
+type EmptySlot = { __empty: true; __tc: number; device_id: string };
+type TcRow = IrDevice | EmptySlot;
+
+function isEmptySlot(r: TcRow): r is EmptySlot {
+  return (r as EmptySlot).__empty === true;
+}
+
+// 固定 16 row（TC01~TC16）框架；命名好的 device 填入對應 slot；
+// 未命名 device（無 tcNum）append 在 16 row 之後（保留可見性 + ⚠ 未命名警告）
+function buildTcRows(devices: IrDevice[]): TcRow[] {
+  const byTc = new Map<number, IrDevice>();
+  const unnamed: IrDevice[] = [];
+  for (const d of devices) {
+    const { tcNum } = parseDisplayName(d.display_name);
+    if (tcNum != null && tcNum >= 1 && tcNum <= 16) {
+      byTc.set(tcNum, d);
+    } else {
+      unnamed.push(d);
+    }
+  }
+  const rows: TcRow[] = [];
+  for (let n = 1; n <= 16; n++) {
+    const d = byTc.get(n);
+    rows.push(d ?? { __empty: true, __tc: n, device_id: `__tcslot_${n}` });
+  }
+  return [...rows, ...unnamed];
 }
 
 // TC01~TC16 下拉選項
@@ -118,12 +136,18 @@ export default function IrDevices() {
     }
   };
 
-  const columns: ColumnsType<IrDevice> = [
+  const EMPTY = <Text type="secondary">—</Text>;
+
+  const columns: ColumnsType<TcRow> = [
     {
       title: '編號',
       key: 'tc_code',
-      width: 80,
+      width: 70,
       render: (_, rec) => {
+        if (isEmptySlot(rec)) {
+          // 空 slot：編號固定顯 TCxx（框架；老王 5/28）
+          return <Text strong>TC{String(rec.__tc).padStart(2, '0')}</Text>;
+        }
         const { tcCode } = parseDisplayName(rec.display_name);
         return tcCode === '—'
           ? <Text type="secondary">—</Text>
@@ -133,63 +157,73 @@ export default function IrDevices() {
     {
       title: '安裝區域',
       key: 'zone',
-      width: 110,
+      width: 80,
       render: (_, rec) => {
+        if (isEmptySlot(rec)) return EMPTY;
         const { zone } = parseDisplayName(rec.display_name);
-        return zone === '—' ? <Text type="secondary">—</Text> : <span>{zone}</span>;
+        return zone === '—' ? EMPTY : <span>{zone}</span>;
       },
     },
     {
       title: '安裝位置',
       key: 'location',
+      width: 200,
       render: (_, rec) => {
+        if (isEmptySlot(rec)) return EMPTY;
         if (isIrUnnamed(rec)) return <Tag color="orange">⚠ 未命名</Tag>;
         const { location } = parseDisplayName(rec.display_name);
-        return location === '—' ? <Text type="secondary">—</Text> : <span>{location}</span>;
+        return location === '—' ? EMPTY : <span>{location}</span>;
       },
     },
     {
       title: 'IP 地址',
       key: 'ip',
-      width: 140,
+      width: 130,
       render: (_, rec) =>
-        rec.ip_address
+        !isEmptySlot(rec) && rec.ip_address
           ? <Text style={{ fontFamily: 'monospace' }}>{rec.ip_address}</Text>
-          : <Text type="secondary">—</Text>,
+          : EMPTY,
     },
     {
       title: 'MAC',
-      dataIndex: 'device_id',
       key: 'mac',
-      width: 180,
-      render: (v: string) => (
-        <Text type="secondary" style={{ fontSize: 12, fontFamily: 'monospace' }}>
-          {formatMac(v)}
-        </Text>
-      ),
+      width: 160,
+      // 老王 5/28 明示：MAC 文字樣式對齊 IP 地址（黑色正常大小 monospace;移除 secondary 灰 + 小字）
+      render: (_, rec) =>
+        isEmptySlot(rec)
+          ? EMPTY
+          : <Text style={{ fontFamily: 'monospace' }}>{formatMac(rec.device_id)}</Text>,
     },
     {
       title: '最後上報時間',
-      dataIndex: 'last_seen',
       key: 'last_seen',
-      width: 180,
-      render: (v: string | null) =>
-        v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">—</Text>,
+      width: 170,
+      render: (_, rec) =>
+        !isEmptySlot(rec) && rec.last_seen
+          ? dayjs(rec.last_seen).format('YYYY-MM-DD HH:mm:ss')
+          : EMPTY,
     },
     {
       title: '操作',
       key: 'actions',
-      width: 80,
-      render: (_, rec) => (
-        <Button
-          icon={<EditOutlined />}
-          size="small"
-          onClick={() => handleEdit(rec)}
-          aria-label="編輯"
-        />
-      ),
+      width: 70,
+      render: (_, rec) =>
+        isEmptySlot(rec)
+          ? EMPTY
+          : (
+            <Button
+              icon={<EditOutlined />}
+              size="small"
+              onClick={() => handleEdit(rec)}
+              aria-label="編輯"
+            />
+          ),
     },
   ];
+
+  // M-P11-E36 老王 5/28 明示：欄位向左縮、不撐滿整頁
+  // columns 總寬 = 70+80+200+130+160+170+70 = 880;外層 maxWidth 限制 table 不 stretch 全畫面
+  const TABLE_MAX_WIDTH = 900;
 
   return (
     <div>
@@ -212,15 +246,18 @@ export default function IrDevices() {
           description={String((error as any)?.message ?? error)}
         />
       )}
-      <Table<IrDevice>
-        rowKey="device_id"
-        columns={columns}
-        dataSource={sortByTcNum(data ?? [])}
-        loading={isLoading}
-        size="middle"
-        pagination={{ pageSize: 20 }}
-        locale={{ emptyText: 'trx_reading 尚無 811c_* 資料；待 Edge 採集後自動出現' }}
-      />
+      <div style={{ maxWidth: TABLE_MAX_WIDTH }}>
+        <Table<TcRow>
+          rowKey="device_id"
+          columns={columns}
+          dataSource={buildTcRows(data ?? [])}
+          loading={isLoading}
+          size="middle"
+          tableLayout="fixed"
+          pagination={{ pageSize: 20 }}
+          locale={{ emptyText: 'trx_reading 尚無 811c_* 資料；待 Edge 採集後自動出現' }}
+        />
+      </div>
 
       <Modal
         title={`設定安裝資訊 — ${editing?.device_id ?? ''}`}
