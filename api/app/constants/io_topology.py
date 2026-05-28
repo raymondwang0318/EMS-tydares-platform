@@ -22,14 +22,17 @@ class SiteDef(TypedDict):
 
 
 # 6 場域 → Edge mapping（採證 ems_edge.edge_name 'TYDARES-E17 = 育成-Aa' etc）
-# M-P12-078 老王 5/28：site_name 顯示名稱更新（site_code 內部 key 不動;對齊 Edge17-22 + device_id）
-#   Aa→A3 / Ab→A4 / Ae→A8 / Ba→B3 / Bc→B4 / C 保留（老王未給新名）
+# M-P12-079 老王 5/28：site_code 對齊實體安裝區域編碼（消除 Aa/A3 雙軌混淆）
+#   舊 Aa/Ab/Ae/Ba/Bc → 新 A3/A4/A8/B3/B4（Ae→A8 跳號=業主實體區域編碼;非 A5）
+#   C 沿用（老王明示）;site_code = site_name 後綴一致
+#   NB: IO site_code 純 constant lookup key;不持久化 DB（device_id 用 edge-based naming;
+#       IO 不綁 ECSU;fnd_io_site 表不存在）→ 改 code 無 DB migration
 IO_SITES: list[SiteDef] = [
-    {"site_code": "Aa", "edge_id": "TYDARES-E17", "site_name": "育成-A3"},
-    {"site_code": "Ab", "edge_id": "TYDARES-E18", "site_name": "育成-A4"},
-    {"site_code": "Ae", "edge_id": "TYDARES-E19", "site_name": "育成-A8"},
-    {"site_code": "Ba", "edge_id": "TYDARES-E20", "site_name": "育成-B3"},
-    {"site_code": "Bc", "edge_id": "TYDARES-E21", "site_name": "育成-B4"},
+    {"site_code": "A3", "edge_id": "TYDARES-E17", "site_name": "育成-A3"},
+    {"site_code": "A4", "edge_id": "TYDARES-E18", "site_name": "育成-A4"},
+    {"site_code": "A8", "edge_id": "TYDARES-E19", "site_name": "育成-A8"},
+    {"site_code": "B3", "edge_id": "TYDARES-E20", "site_name": "育成-B3"},
+    {"site_code": "B4", "edge_id": "TYDARES-E21", "site_name": "育成-B4"},
     {"site_code": "C", "edge_id": "TYDARES-E22", "site_name": "育成-C"},
 ]
 

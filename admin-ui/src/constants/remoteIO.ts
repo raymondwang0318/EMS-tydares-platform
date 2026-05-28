@@ -13,7 +13,8 @@
 export type FanType = 'fugu' | 'xun'; // fugu = 負壓 / xun = 內循環
 
 export interface SiteConfig {
-  code: 'Aa' | 'Ab' | 'Ae' | 'Ba' | 'Bc' | 'C';
+  // M-P12-079 site code 對齊實體安裝區域編碼（舊 Aa/Ab/Ae/Ba/Bc → A3/A4/A8/B3/B4;C 沿用）
+  code: 'A3' | 'A4' | 'A8' | 'B3' | 'B4' | 'C';
   edge_id: string;
   edge_lan_ip: string;
   name: string;
@@ -29,14 +30,15 @@ export interface SiteConfig {
  * 6 場域配置（業主 5/19 ground truth；全育成基地）
  * vault SSOT §三
  */
-// M-P12-078 老王 5/28：區域顯示名稱更新（code 內部 key 不動;對齊 Edge17-22 device）
-//   Aa→A3 / Ab→A4 / Ae→A8 / Ba→B3 / Bc→B4 / C 保留（老王未給新名）
+// M-P12-079 老王 5/28：site code 對齊實體安裝區域編碼（消除 Aa/A3 雙軌混淆）
+//   舊 Aa/Ab/Ae/Ba/Bc → 新 A3/A4/A8/B3/B4（Ae→A8 跳號=業主實體區域編碼;非 A5）;C 沿用
+//   code = name 後綴一致;code 純 frontend/backend lookup key（不持久化 DB;device_id 用 edge-based）
 export const SITE_CONFIGS: SiteConfig[] = [
-  { code: 'Aa', edge_id: 'TYDARES-E17', edge_lan_ip: '192.168.10.65', name: '育成-A3', fugu_count: 6, xun_count: 3, is_max: true },
-  { code: 'Ab', edge_id: 'TYDARES-E18', edge_lan_ip: '192.168.10.66', name: '育成-A4', fugu_count: 4, xun_count: 2, is_max: false },
-  { code: 'Ae', edge_id: 'TYDARES-E19', edge_lan_ip: '192.168.10.67', name: '育成-A8', fugu_count: 6, xun_count: 3, is_max: true },
-  { code: 'Ba', edge_id: 'TYDARES-E20', edge_lan_ip: '192.168.10.68', name: '育成-B3', fugu_count: 6, xun_count: 3, is_max: true },
-  { code: 'Bc', edge_id: 'TYDARES-E21', edge_lan_ip: '192.168.10.69', name: '育成-B4', fugu_count: 4, xun_count: 2, is_max: false },
+  { code: 'A3', edge_id: 'TYDARES-E17', edge_lan_ip: '192.168.10.65', name: '育成-A3', fugu_count: 6, xun_count: 3, is_max: true },
+  { code: 'A4', edge_id: 'TYDARES-E18', edge_lan_ip: '192.168.10.66', name: '育成-A4', fugu_count: 4, xun_count: 2, is_max: false },
+  { code: 'A8', edge_id: 'TYDARES-E19', edge_lan_ip: '192.168.10.67', name: '育成-A8', fugu_count: 6, xun_count: 3, is_max: true },
+  { code: 'B3', edge_id: 'TYDARES-E20', edge_lan_ip: '192.168.10.68', name: '育成-B3', fugu_count: 6, xun_count: 3, is_max: true },
+  { code: 'B4', edge_id: 'TYDARES-E21', edge_lan_ip: '192.168.10.69', name: '育成-B4', fugu_count: 4, xun_count: 2, is_max: false },
   { code: 'C', edge_id: 'TYDARES-E22', edge_lan_ip: '192.168.10.70', name: '育成-C', fugu_count: 3, xun_count: 1, is_max: false },
 ];
 

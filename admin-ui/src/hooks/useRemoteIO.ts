@@ -85,10 +85,10 @@ function deviceIdToAlarmInfo(
   device_id: string,
   channel: number,
 ): { edge_id: string; site_code: string; fan_type: FanType; fan_index: number; fan_name: string } | null {
-  // 格式：tcs300b03-TYDARES-E22-DI1
-  const m = device_id.match(/^tcs300b03-(.+?)-DI(\d+)$/i);
+  // 格式：tcs300b03_di-TYDARES-E17-slave1（ScanWizard confirm 格式）
+  const m = device_id.match(/^tcs300b03_di-(.+?)-slave(\d+)$/i);
   if (!m) return null;
-  const edge_id = m[1]; // TYDARES-E22
+  const edge_id = m[1]; // TYDARES-E17
   const slave_di = parseInt(m[2], 10); // 1, 2, 3
   const site = SITE_CONFIGS.find((s) => s.edge_id === edge_id);
   const site_code = site?.code ?? '??';
@@ -139,7 +139,7 @@ function mockFanStatus(edge_id: string, fan_type: FanType, fan_index: number): F
 const MOCK_ACTIVE_ALARMS: ActiveAlarm[] = [
   {
     alarm_id: 'mock-alarm-001',
-    site_code: 'Aa',
+    site_code: 'A3', // M-P12-079 對齊實體區域編碼（舊 'Aa'）
     edge_id: 'TYDARES-E17',
     fan_type: 'fugu',
     fan_index: 2,
@@ -166,7 +166,8 @@ export function useFanStatus(edge_id: string, fan_type: FanType, fan_index: numb
         return mockFanStatus(edge_id, fan_type, fan_index);
       }
       const mapping = getFanChannelMapping(fan_type, fan_index);
-      const deviceId = `tcs300b03-${edge_id}-DI${mapping.slave_di}`;
+      // device_id 對齊 ScanWizard confirm 格式：tcs300b03_di-{edge_id}-slave{N}
+      const deviceId = `tcs300b03_di-${edge_id}-slave${mapping.slave_di}`;
       try {
         const r = await api.get<DeviceStatusResponse>(
           `/admin/io/devices/${encodeURIComponent(deviceId)}/status`,
@@ -219,16 +220,18 @@ export function useDOControl() {
         return { status: 'mock_ok' };
       }
       const mapping = getFanChannelMapping(vars.fan_type, vars.fan_index);
-      const doDeviceId = `tcs300b04-${vars.edge_id}-DO1`;
+      // device_id 對齊 ScanWizard confirm 格式：tcs300b04_do-{edge_id}-slave4
+      // TCS300B04 (DO) 各 edge 固定 Modbus slave 4；ScanWizard 以此建立 device record
+      // backend Guard 3 檢查 device_kind='tcs300b04_do'；DB lookup 需與 ScanWizard 寫入格式一致
+      const doDeviceId = `tcs300b04_do-${vars.edge_id}-slave4`;
       const edgeNum = vars.edge_id.match(/E(\d+)$/)?.[1] ?? '??';
       const relayId = `E${edgeNum}-DO1-ch${mapping.do_channel}`;
       const r = await api.post<{ command_id?: string; status?: string; command_type?: string }>(
         `/admin/io/devices/${encodeURIComponent(doDeviceId)}/channels/${mapping.do_channel}/control`,
         {
-          action: vars.new_state ? 'on' : 'off',
-          relay_id: relayId,
-          reason: '遠端 I/O 操作（admin-ui）',
-          operator: 'admin',
+          state: vars.new_state,           // ControlBody.state: boolean（True=ON / False=OFF）
+          actor: 'admin',                  // ControlBody.actor（非 operator）
+          reason: `遠端 I/O 操作（admin-ui）relay_id=${relayId}`,
         },
       );
       return { status: r.data.status ?? 'queued', command_id: r.data.command_id };

@@ -97,9 +97,10 @@ async def push_telegram_alarm(alarm_summary: dict[str, Any]) -> bool:
 
 @router.get("/sites")
 async def list_io_sites():
-    """列 6 IO 場域（Aa/Ab/Ae/Ba/Bc/C → Edge17-22）.
+    """列 6 IO 場域（A3/A4/A8/B3/B4/C → Edge17-22）.
 
-    採證 ems_edge.edge_name 'TYDARES-E17 = 育成-Aa' etc；vault SSOT §2 場域配置。
+    site_code M-P12-079 對齊實體安裝區域編碼（舊 Aa/Ab/Ae/Ba/Bc → A3/A4/A8/B3/B4;C 沿用）;
+    vault SSOT §2 場域配置。
     """
     sites = list_sites()
     fan_count = len(list_fans_template())  # max 9 (6 negative + 3 circulation)
@@ -161,7 +162,7 @@ async def list_site_fans(
 
 @router.get("/devices")
 async def list_io_devices(
-    site_code: str | None = Query(None, description="filter by 6 場域 Aa/Ab/Ae/Ba/Bc/C"),
+    site_code: str | None = Query(None, description="filter by 6 場域 A3/A4/A8/B3/B4/C"),
     device_kind: str | None = Query(None, description="filter tcs300b03_di | tcs300b04_do"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -355,21 +356,27 @@ async def control_do(
             "(device_id=%s channel=%d state=%s)", device_id, channel, body.state
         )
 
-    # === 派 ems_commands command_type='io.do.set' ===
+    # === 派 ems_commands command_type='relay.set' ===
+    # relay_id 格式：EXX-DO1-chX（Edge handler relay_control.py 定義）
+    # DOx 序：每 edge 固定 1 個 TCS300B04（DO1）；TCS300B04_DO_SLAVES env="4" 即 slave4
+    # edge_id 如 "TYDARES-E17" → edge_num="17"
+    edge_num = edge_id.rsplit("E", 1)[-1]
+    relay_id = f"E{edge_num}-DO1-ch{channel}"
+    target_state = "ON" if body.state else "OFF"
     payload = {
+        "relay_id": relay_id,
+        "target_state": target_state,
+        # audit trail（edge handler 不用；Central log 用）
         "device_id": device_id,
         "channel": channel,
         "state": body.state,
-        "fc": 6,  # FC06 Write Single Register
-        "register_addr": 0,  # @ 0x0000
-        "edge_relay_handler": "relay.set",  # Edge handlers.py dispatch
         "ssot_ref": "vault §4.5.2 DO write FC06 mask",
     }
     command_id = await command_service.create_command(
         db=db,
         edge_id=edge_id,
         device_id=device_id,
-        command_type="io.do.set",
+        command_type="relay.set",
         payload=payload,
         priority=8,  # 業主控制動作 high priority
         idempotency_key=None,

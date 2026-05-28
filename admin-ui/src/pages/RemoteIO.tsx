@@ -136,54 +136,28 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
     );
   }
 
-  // status === null：DI data_source=pending_ingest — 顯示 DO 控制按鈕 + 待 ingest 提示
-  if (status === null) {
-    return (
-      <Card
-        size="small"
-        style={{ minHeight: 180 }}
-        title={<Space size={6}><Text strong>{fan_name}</Text></Space>}
-        extra={<ExclamationCircleOutlined style={{ color: '#d4b106', fontSize: 16 }} />}
-      >
-        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            DI 狀態待 ingest（trx_io_reading）
-          </Text>
-          <Button
-            type="primary"
-            block
-            icon={<PlayCircleOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(true)}
-          >
-            DO 啟動
-          </Button>
-          <Button
-            block
-            icon={<StopOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(false)}
-          >
-            DO 停止
-          </Button>
-        </Space>
-      </Card>
-    );
-  }
-
-  // status === undefined：query error（非 404）→ 與 pending_ingest 同樣顯示 DO 操作卡
+  // status null/undefined：DI pending_ingest 或 API 尚未就緒
+  // 維持與 Phase A 相同卡片結構：DI Tag 全灰（○）+ 待 ingest 說明 + 一顆啟動按鈕
   if (!status) {
     return (
       <Card
         size="small"
-        style={{ minHeight: 180 }}
+        style={{ borderColor: '#d9d9d9', borderWidth: 2 }}
         title={<Space size={6}><Text strong>{fan_name}</Text></Space>}
-        extra={<ExclamationCircleOutlined style={{ color: '#d4b106', fontSize: 16 }} />}
+        extra={<StopOutlined style={{ color: '#d9d9d9', fontSize: 18 }} />}
       >
-        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            DI 狀態待 ingest（trx_io_reading）
-          </Text>
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Space size={4} wrap>
+            <Tag color="default">手動 ○</Tag>
+            <Tag color="default">自動 ○</Tag>
+          </Space>
+          <Space size={4} wrap>
+            <Tag color="default">運轉 ○</Tag>
+            <Tag color="default">過載 ○</Tag>
+          </Space>
+          <div style={{ marginTop: 8, marginBottom: 8 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>⏳ 待 DI 狀態 ingest</Text>
+          </div>
           <Button
             type="primary"
             block
@@ -191,15 +165,7 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
             loading={doControl.isPending}
             onClick={() => handleDOControl(true)}
           >
-            DO 啟動
-          </Button>
-          <Button
-            block
-            icon={<StopOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(false)}
-          >
-            DO 停止
+            啟動
           </Button>
         </Space>
       </Card>
@@ -449,7 +415,7 @@ function AlarmPanel() {
 // ─────────────────────────────────────────────────────────────
 
 export default function RemoteIO() {
-  const [activeSite, setActiveSite] = useState<SiteConfig['code']>('Aa');
+  const [activeSite, setActiveSite] = useState<SiteConfig['code']>('A3'); // M-P12-079 預設首區（舊 'Aa'）
 
   return (
     <div>
