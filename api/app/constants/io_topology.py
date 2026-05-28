@@ -16,9 +16,9 @@ from typing import TypedDict
 
 
 class SiteDef(TypedDict):
-    site_code: str       # Aa / Ab / Ae / Ba / Bc / C
+    site_code: str       # A3 / A4 / A8 / B3 / B4 / C（M-P12-079 對齊實體區域編碼）
     edge_id: str         # TYDARES-E17 ... E22
-    site_name: str       # 業務命名（育成 Aa 等）
+    site_name: str       # 業務命名（育成-A3 等）
 
 
 # 6 場域 → Edge mapping（採證 ems_edge.edge_name 'TYDARES-E17 = 育成-Aa' etc）
