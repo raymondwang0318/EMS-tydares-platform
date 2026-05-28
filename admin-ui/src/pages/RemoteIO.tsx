@@ -1,5 +1,5 @@
 /**
- * 遠端 I/O 監控頁（M-PM-240 Phase A mock）
+ * 遠端 I/O 監控頁（M-PM-280 Phase B 真資料整合）
  *
  * 依託 vault SSOT v1.0 [[01_Edge/遠端IO_腳位功能模板_TCS300B03_TCS300B04]]
  *
@@ -10,7 +10,10 @@
  * - DO 啟動/停止 confirm dialog（v1.4 §61 二次確認）
  * - alarm panel + ack dialog（manual reset；reason + note）
  *
- * Phase A：mock data fallback；Phase B（M-PM-242 backend ready）切 real API
+ * Phase B：real backend API（M-P12-058 commit c49725e）
+ * - DI 狀態：data_source=pending_ingest → FanCard 顯示「DI 待 ingest」+ 保留 DO 按鈕
+ * - DO 控制：✅ 可用（命令入 ems_commands queue；Guard stub-pass）
+ * - Alarm：✅ 可用
  */
 import { useMemo, useState } from 'react';
 import {
@@ -125,13 +128,51 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
     }
   }, [mode]);
 
-  if (isLoading || !status) {
+  if (isLoading) {
     return (
       <Card size="small" style={{ minHeight: 180 }}>
         <Spin />
       </Card>
     );
   }
+
+  // status === null：DI data_source=pending_ingest — 顯示 DO 控制按鈕 + 待 ingest 提示
+  if (status === null) {
+    return (
+      <Card
+        size="small"
+        style={{ minHeight: 180 }}
+        title={<Space size={6}><Text strong>{fan_name}</Text></Space>}
+        extra={<ExclamationCircleOutlined style={{ color: '#d4b106', fontSize: 16 }} />}
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            DI 狀態待 ingest（trx_io_reading）
+          </Text>
+          <Button
+            type="primary"
+            block
+            icon={<PlayCircleOutlined />}
+            loading={doControl.isPending}
+            onClick={() => handleDOControl(true)}
+          >
+            DO 啟動
+          </Button>
+          <Button
+            block
+            icon={<StopOutlined />}
+            loading={doControl.isPending}
+            onClick={() => handleDOControl(false)}
+          >
+            DO 停止
+          </Button>
+        </Space>
+      </Card>
+    );
+  }
+
+  // status === undefined：query 尚未完成（不應出現；isLoading 應已攔截）
+  if (!status) return null;
 
   const ModeIcon = mode === 'overload'
     ? WarningOutlined
