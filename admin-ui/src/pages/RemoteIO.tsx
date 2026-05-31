@@ -422,7 +422,7 @@ export default function RemoteIO() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} align="start">
         <div>
           <Title level={3} style={{ margin: 0 }}>
-            <ThunderboltOutlined /> 遠端 I/O 監控
+            <ThunderboltOutlined /> 遠端 I/O 操作
           </Title>
           <Text type="secondary">
             6 場域 × 9 風扇（最大）；4 DI（手動/自動/運轉/過載）+ 1 DO（自動起動）；對齊 vault SSOT v1.0
