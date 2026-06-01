@@ -18,6 +18,43 @@ import { SITE_CONFIGS } from '../constants/remoteIO';
 const { Title, Text } = Typography;
 
 // ─────────────────────────────────────────────────────────────
+// 預設點位名稱（電路圖 2026-06-01 老王提供）
+// key: `${slaveNum}_${chNum}`
+// ─────────────────────────────────────────────────────────────
+
+const _DI_SIGNAL = ['手動', '自動', '運轉', '過載'] as const;
+
+const DEFAULT_CHANNEL_NAMES: Record<string, string> = {
+  // DI Slave 1 (AX1~16)：負壓風扇 1-4
+  ...Object.fromEntries(
+    [1, 2, 3, 4].flatMap((fan, fi) =>
+      _DI_SIGNAL.map((sig, si) => [`1_${fi * 4 + si + 1}`, `負壓風扇${fan} ${sig}`])
+    )
+  ),
+  // DI Slave 2 (BX1~16)：負壓風扇 5-6 + 內循環風扇 1-2
+  ...Object.fromEntries([
+    ...[5, 6].flatMap((fan, fi) =>
+      _DI_SIGNAL.map((sig, si) => [`2_${fi * 4 + si + 1}`, `負壓風扇${fan} ${sig}`])
+    ),
+    ...[1, 2].flatMap((fan, fi) =>
+      _DI_SIGNAL.map((sig, si) => [`2_${(fi + 2) * 4 + si + 1}`, `內循環風扇${fan} ${sig}`])
+    ),
+  ]),
+  // DI Slave 3 (CX1~4)：內循環風扇 3（ch5~16 留空）
+  ...Object.fromEntries(
+    _DI_SIGNAL.map((sig, si) => [`3_${si + 1}`, `內循環風扇3 ${sig}`])
+  ),
+  // DO Slave 4 (AY1~9)：負壓風扇 1-6 + 內循環風扇 1-3 自動起動
+  ...Object.fromEntries([
+    ...[1, 2, 3, 4, 5, 6].map((fan, i) => [`4_${i + 1}`, `負壓風扇${fan} 自動起動`]),
+    ...[1, 2, 3].map((fan, i) => [`4_${i + 7}`, `內循環風扇${fan} 自動起動`]),
+  ]),
+};
+
+const getDefaultName = (slaveNum: number, ch: number): string =>
+  DEFAULT_CHANNEL_NAMES[`${slaveNum}_${ch}`] ?? '';
+
+// ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
 
@@ -68,8 +105,8 @@ const getModuleLabel = (deviceId: string): string => {
 };
 
 const nameKey = (deviceId: string, ch: number) => `io_name_${deviceId}_${ch}`;
-const getLocalName = (deviceId: string, ch: number): string =>
-  localStorage.getItem(nameKey(deviceId, ch)) ?? '';
+const getLocalName = (deviceId: string, ch: number, slaveNum: number): string =>
+  localStorage.getItem(nameKey(deviceId, ch)) ?? getDefaultName(slaveNum, ch);
 const setLocalName = (deviceId: string, ch: number, name: string): void =>
   localStorage.setItem(nameKey(deviceId, ch), name);
 
@@ -178,9 +215,10 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
     refetchInterval: 3000,
   });
 
+  const slaveNum = getSlaveNum(device.device_id);
   const [localNames, setLocalNames] = useState<Record<number, string>>(() => {
     const init: Record<number, string> = {};
-    for (let ch = 1; ch <= 16; ch++) init[ch] = getLocalName(device.device_id, ch);
+    for (let ch = 1; ch <= 16; ch++) init[ch] = getLocalName(device.device_id, ch, slaveNum);
     return init;
   });
 
