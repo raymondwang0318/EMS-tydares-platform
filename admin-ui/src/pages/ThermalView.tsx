@@ -158,14 +158,17 @@ export default function ThermalView() {
     [],
   );
 
+  // unmount 時才全斷 SSE（不跟 URL refetch 連動，避免 30s 強制重連）
+  useEffect(() => {
+    return () => { thermalSSEClient.disconnect(); };
+  }, []);
+
+  // URL 真的改變時才 connectMulti（內建 diff，不重建既有連線）
   useEffect(() => {
     if (sseBaseUrls.length === 0) return;
     thermalSSEClient.connectMulti(sseBaseUrls);
     const unsub = thermalSSEClient.onFrame(handleFrame);
-    return () => {
-      unsub();
-      thermalSSEClient.disconnect();
-    };
+    return () => { unsub(); }; // 只取消訂閱，不斷線
   }, [sseBaseUrls, handleFrame]);
 
   // 每 5s 重算 isOnline（ONLINE_STALE_MS 判斷）
@@ -196,13 +199,24 @@ export default function ThermalView() {
   );
 
   /**
-   * 顯示 frame：
-   *   1. React state（最新）
-   *   2. 模組快取（fallback — 對抗 state 重置，保留最後一張）
+   * 顯示 frame（三層 fallback）：
+   *   1. 選中設備 React state
+   *   2. 選中設備模組快取（對抗 state 重置）
+   *   3. 任意設備最近一筆（SSE 沒在傳時保持畫面不白）
    */
-  const frame = selectedDevice
-    ? (frames[selectedDevice] ?? _frameCache[selectedDevice] ?? null)
-    : null;
+  const frame = (() => {
+    if (selectedDevice) {
+      const hit = frames[selectedDevice] ?? _frameCache[selectedDevice];
+      if (hit) return hit;
+    }
+    // fallback：所有快取中 receivedAt 最大的那一筆
+    const all = Object.values({ ...frames, ..._frameCache });
+    if (all.length === 0) return null;
+    return all.reduce((a, b) => (a.receivedAt >= b.receivedAt ? a : b));
+  })();
+
+  /** frame 是否屬於目前選中設備（false = 顯示的是 fallback 其他設備） */
+  const frameMatchesSelected = !!selectedDevice && frame?.deviceId === selectedDevice;
 
   return (
     <Spin spinning={false}>
@@ -283,6 +297,11 @@ export default function ThermalView() {
 
       {frame ? (
         <Card size="small" styles={{ body: { padding: 0, overflow: 'hidden' } }}>
+          {!frameMatchesSelected && frame && (
+            <div style={{ padding: '4px 10px', fontSize: 12, color: '#888', background: '#fffbe6', borderBottom: '1px solid #ffe58f' }}>
+              ⚠️ 選取設備尚無資料，顯示最後收到的畫面（{frame.deviceId}）
+            </div>
+          )}
           <ThermalDisplay
             image={frame.image}
             irdata={frame.irdata}
@@ -297,8 +316,8 @@ export default function ThermalView() {
         <Card>
           <div style={{ textAlign: 'center', padding: 48, color: '#999' }}>
             {sseBaseUrls.length === 0
-              ? '正在連接 Edge SSE...'
-              : '等待 811C SSE 串流資料... (尚未收到對應 device 的 frame)'}
+              ? '正在連接 Edge...'
+              : '尚未收到任何熱像資料，請確認 Edge 連線狀態'}
           </div>
         </Card>
       )}
