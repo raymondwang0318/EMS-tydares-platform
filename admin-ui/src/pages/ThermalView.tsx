@@ -199,21 +199,15 @@ export default function ThermalView() {
   );
 
   /**
-   * 顯示 frame（三層 fallback）：
-   *   1. 選中設備 React state
-   *   2. 選中設備模組快取（對抗 state 重置）
-   *   3. 任意設備最近一筆（SSE 沒在傳時保持畫面不白）
+   * 顯示 frame（選中設備兩層 fallback）：
+   *   1. 選中設備 React state（最新）
+   *   2. 選中設備模組快取（state 重置 / 斷線後保留最後一張）
+   *
+   * 注意：不跨設備 fallback，否則 SSE 持續接收其他設備 frame 時畫面會亂跳。
    */
-  const frame = (() => {
-    if (selectedDevice) {
-      const hit = frames[selectedDevice] ?? _frameCache[selectedDevice];
-      if (hit) return hit;
-    }
-    // fallback：所有快取中 receivedAt 最大的那一筆
-    const all = Object.values({ ...frames, ..._frameCache });
-    if (all.length === 0) return null;
-    return all.reduce((a, b) => (a.receivedAt >= b.receivedAt ? a : b));
-  })();
+  const frame = selectedDevice
+    ? (frames[selectedDevice] ?? _frameCache[selectedDevice] ?? null)
+    : null;
 
 
   return (
