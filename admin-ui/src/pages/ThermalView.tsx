@@ -302,9 +302,13 @@ export default function ThermalView() {
       ) : (
         <Card>
           <div style={{ textAlign: 'center', padding: 48, color: '#999' }}>
-            {sseBaseUrls.length === 0
-              ? '正在連接 Edge...'
-              : '尚未收到任何熱像資料，請確認 Edge 連線狀態'}
+            {(() => {
+              if (sseBaseUrls.length === 0) return '正在連接 Edge...';
+              const sel = tcButtons.find((b) => b.isSelected);
+              const tcCode = sel ? `TC${String(sel.num).padStart(2, '0')}` : '此設備';
+              const loc = sel?.location ? `（${sel.location}）` : '';
+              return `${tcCode}${loc} 目前無即時影像串流；最後上報時間請見「IR 標籤管理」頁`;
+            })()}
           </div>
         </Card>
       )}
