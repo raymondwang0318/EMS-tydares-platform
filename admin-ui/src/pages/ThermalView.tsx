@@ -215,8 +215,6 @@ export default function ThermalView() {
     return all.reduce((a, b) => (a.receivedAt >= b.receivedAt ? a : b));
   })();
 
-  /** frame 是否屬於目前選中設備（false = 顯示的是 fallback 其他設備） */
-  const frameMatchesSelected = !!selectedDevice && frame?.deviceId === selectedDevice;
 
   return (
     <Spin spinning={false}>
@@ -297,11 +295,6 @@ export default function ThermalView() {
 
       {frame ? (
         <Card size="small" styles={{ body: { padding: 0, overflow: 'hidden' } }}>
-          {!frameMatchesSelected && frame && (
-            <div style={{ padding: '4px 10px', fontSize: 12, color: '#888', background: '#fffbe6', borderBottom: '1px solid #ffe58f' }}>
-              ⚠️ 選取設備尚無資料，顯示最後收到的畫面（{frame.deviceId}）
-            </div>
-          )}
           <ThermalDisplay
             image={frame.image}
             irdata={frame.irdata}
