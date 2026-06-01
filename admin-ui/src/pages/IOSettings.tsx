@@ -262,7 +262,7 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
 
   return (
     <Collapse
-      defaultActiveKey={['module']}
+      defaultActiveKey={[]}
       size="small"
       style={{ marginBottom: 12 }}
       items={[{
