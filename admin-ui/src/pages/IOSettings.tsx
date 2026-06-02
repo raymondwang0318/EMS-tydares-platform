@@ -6,9 +6,9 @@
  *         Collapse 展開/收縮每模組
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Typography, Tabs, Collapse, Input, Button, Space, Alert, Spin, Tag, Tooltip
+  Typography, Tabs, Collapse, Input, Button, Space, Alert, Spin, Tag, Tooltip, message
 } from 'antd';
 import { ControlOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useQuery, useMutation } from '@tanstack/react-query';
@@ -70,6 +70,8 @@ interface ChannelDef {
   code: string;
   name: string;
   category: string;
+  channel?: number | null;       // M-PM-293 §B：GET 回傳 channel 號
+  custom_name?: string | null;   // M-PM-293 §B：業主自訂點位名稱（後端持久化）
 }
 
 interface ChannelState { channel: number; state: 0 | 1; }
@@ -104,11 +106,9 @@ const getModuleLabel = (deviceId: string): string => {
   return deviceId;
 };
 
-const nameKey = (deviceId: string, ch: number) => `io_name_${deviceId}_${ch}`;
-const getLocalName = (deviceId: string, ch: number, slaveNum: number): string =>
-  localStorage.getItem(nameKey(deviceId, ch)) ?? getDefaultName(slaveNum, ch);
-const setLocalName = (deviceId: string, ch: number, name: string): void =>
-  localStorage.setItem(nameKey(deviceId, ch), name);
+// 點位名稱初始值（M-PM-293 §B 切真實 API）：
+//   後端 custom_name（業主已存）優先 → 否則電路圖預設名（DEFAULT_CHANNEL_NAMES）
+// 儲存改打 PATCH /channels/{ch}（取代原 localStorage）
 
 // ─────────────────────────────────────────────────────────────
 // Lamp — status indicator
@@ -139,11 +139,12 @@ interface ChannelCellProps {
   onSave: (ch: number) => void;
   onDOTest: (ch: number) => void;
   doLoading: boolean;
+  saveLoading: boolean;
 }
 
 function ChannelCell({
   chNum, isDI, state,
-  localNames, setLocalNames, onSave, onDOTest, doLoading,
+  localNames, setLocalNames, onSave, onDOTest, doLoading, saveLoading,
 }: ChannelCellProps) {
   const label = chLabel(isDI, chNum);
   return (
@@ -164,10 +165,11 @@ function ChannelCell({
         onChange={e => setLocalNames(prev => ({ ...prev, [chNum]: e.target.value }))}
         style={{ flex: 1, fontSize: 12, minWidth: 80 }}
       />
-      <Tooltip title="儲存名稱（本機暫存）">
+      <Tooltip title="儲存名稱至伺服器">
         <Button
           size="small"
           icon={<SaveOutlined style={{ fontSize: 11 }} />}
+          loading={saveLoading}
           onClick={() => onSave(chNum)}
           style={{ flexShrink: 0, padding: '0 4px' }}
         />
@@ -216,14 +218,33 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
   });
 
   const slaveNum = getSlaveNum(device.device_id);
-  const [localNames, setLocalNames] = useState<Record<number, string>>(() => {
+  const [localNames, setLocalNames] = useState<Record<number, string>>({});
+
+  // 種子：channelData 載入後，以後端 custom_name（已存）優先 → 否則電路圖預設名
+  // seededRef 確保只種一次，不覆蓋業主正在編輯的內容
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || !channelData?.channels) return;
     const init: Record<number, string> = {};
-    for (let ch = 1; ch <= 16; ch++) init[ch] = getLocalName(device.device_id, ch, slaveNum);
-    return init;
-  });
+    for (const c of channelData.channels) {
+      const ch = c.channel ?? parseChNum(c.code);
+      if (ch >= 1 && ch <= 16) init[ch] = c.custom_name ?? getDefaultName(slaveNum, ch);
+    }
+    setLocalNames(init);
+    seededRef.current = true;
+  }, [channelData, slaveNum]);
 
   const autoOffTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
   const [doLoadingCh, setDoLoadingCh] = useState<number | null>(null);
+  const [savingCh, setSavingCh] = useState<number | null>(null);
+
+  // M-PM-293 §B：儲存點位名稱 → PATCH /channels/{ch}（取代 localStorage）
+  const saveMutation = useMutation({
+    mutationFn: ({ ch, name }: { ch: number; name: string }) =>
+      api.patch(`/admin/io/devices/${device.device_id}/channels/${ch}`, {
+        custom_name: name.trim() || null,
+      }),
+  });
 
   const controlMutation = useMutation({
     mutationFn: ({ ch, state }: { ch: number; state: boolean }) =>
@@ -248,8 +269,13 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
   }, [controlMutation]);
 
   const handleSaveName = useCallback((ch: number) => {
-    setLocalName(device.device_id, ch, localNames[ch] ?? '');
-  }, [device.device_id, localNames]);
+    setSavingCh(ch);
+    saveMutation.mutate({ ch, name: localNames[ch] ?? '' }, {
+      onSettled: () => setSavingCh(null),
+      onSuccess: () => message.success(`${chLabel(isDI, ch)} 名稱已儲存`),
+      onError: () => message.error(`${chLabel(isDI, ch)} 儲存失敗`),
+    });
+  }, [saveMutation, localNames, isDI]);
 
   // Build state map
   const stateMap: Record<number, 0 | 1> = {};
@@ -271,7 +297,6 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
   const rightChs = allChs.filter(n => n > 8);
 
   const cellProps = (ch: number) => ({
-    deviceId: device.device_id,
     chNum: ch,
     isDI,
     state: isPending ? null : (stateMap[ch] ?? null) as 0 | 1 | null,
@@ -280,6 +305,7 @@ function DeviceGroup({ device, enabled }: { device: IoDevice; enabled: boolean }
     onSave: handleSaveName,
     onDOTest: handleDOTest,
     doLoading: doLoadingCh === ch,
+    saveLoading: savingCh === ch,
   });
 
   // Collapse header with lamp summary
@@ -389,8 +415,8 @@ export default function IOSettings() {
       <Alert
         type="info"
         showIcon
-        message="點位名稱暫存本機"
-        description="點位名稱儲存功能目前為本機暫存（localStorage）。後端 PATCH endpoint 補齊後將自動同步至伺服器（P12A 待補）。"
+        message="點位名稱已連動伺服器"
+        description="點位名稱儲存至後端（ems_device_channel_metadata），Boss 可透過 API 查詢。預設帶入電路圖名稱，可編輯後按儲存覆蓋。"
         style={{ marginBottom: 12 }}
         closable
       />
