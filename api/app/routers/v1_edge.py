@@ -5,7 +5,12 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -103,6 +108,48 @@ async def post_config_ack(
         errors=body.errors,
     )
     return ConfigAckResponse(status="ok")
+
+
+# ========== Edge 主機健康心跳（edge 溫度採集紀錄 Phase 1）==========
+
+class EdgeHeartbeatRequest(BaseModel):
+    """Edge 主機健康心跳 body（Phase 1 先收 CPU 核心溫度；extra 供未來 disk/uptime 擴充）。"""
+    cpu_temp_c: float | None = Field(None, description="CPU 核心溫度 °C（讀 /sys/class/thermal）")
+    extra: dict[str, Any] | None = Field(None, description="未來擴充：disk_pct / uptime_sec 等")
+
+
+@router.post("/edges/{edge_id}/heartbeat")
+async def post_edge_heartbeat(
+    edge_id: str,
+    body: EdgeHeartbeatRequest,
+    request: Request,
+    edge: EmsEdge = Depends(verify_edge),
+    db: AsyncSession = Depends(get_db),
+):
+    """Edge 主機健康心跳 — 寫入 ems_edge_heartbeat（payload_json 帶 cpu_temp_c）。
+
+    Phase 1（edge 核心溫度採集紀錄）：純 INSERT，不碰既有 ingest/config-sync/auth 邏輯。
+    隔離端點；verify_edge 認證。Phase 2 再做告警判斷 + UI 顯示。
+    """
+    if edge.edge_id != edge_id:
+        raise HTTPException(status_code=403, detail="edge_id mismatch with token")
+
+    payload: dict[str, Any] = {}
+    if body.cpu_temp_c is not None:
+        payload["cpu_temp_c"] = body.cpu_temp_c
+    if body.extra:
+        payload.update(body.extra)
+
+    await db.execute(text("""
+        INSERT INTO ems_edge_heartbeat (edge_id, hb_ts, ip_addr, payload_json)
+        VALUES (:edge_id, NOW(), :ip, CAST(:payload AS JSONB))
+    """), {
+        "edge_id": edge_id,
+        "ip": get_client_ip(request),
+        "payload": json.dumps(payload),
+    })
+    await db.commit()
+    return {"status": "ok", "edge_id": edge_id, "recorded": payload}
 
 
 # ========== Admin 管理 Edge ==========
