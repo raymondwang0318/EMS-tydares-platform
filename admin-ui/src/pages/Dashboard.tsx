@@ -1,15 +1,39 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Col, Row, Space, Statistic, Spin, Alert, Typography } from 'antd';
+import { useNavigate } from 'react-router-dom';
+import { Button, Card, Col, Row, Space, Statistic, Spin, Alert, Typography, List, Tag, Empty } from 'antd';
 import {
   ClusterOutlined,
   ThunderboltOutlined,
   NodeIndexOutlined,
   BellOutlined,
   ReloadOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import api from '../services/api';
 
 const { Title, Text } = Typography;
+
+// M-PM-306：Dashboard 首頁「最近異常」widget
+interface EmsEvent {
+  event_id: number;
+  ts: string;
+  event_kind: string;
+  severity: string | null;
+  edge_id: string | null;
+  message: string | null;
+}
+
+const sevColor = (s: string | null): string => {
+  switch ((s ?? '').toLowerCase()) {
+    case 'error': case 'critical': case 'fatal': return 'red';
+    case 'warn': case 'warning': return 'orange';
+    case 'info': return 'blue';
+    default: return 'default';
+  }
+};
+const fmtTs = (ts: string): string => {
+  try { return new Date(ts).toLocaleString('zh-TW', { hour12: false }); } catch { return ts; }
+};
 
 /**
  * V2-final 系統總覽
@@ -24,7 +48,9 @@ const { Title, Text } = Typography;
  *   - 加「重新整理」按鈕（顯式手動 refetch；與 Edges 頁 reload pattern 對齊）
  */
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState({ edges: 0, devices: 0, deviceModels: 0, events24h: 0 });
+  const [recentEvents, setRecentEvents] = useState<EmsEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
@@ -64,7 +90,13 @@ export default function Dashboard() {
           '/reports/events',
           api
             .get('/reports/events', { params: { from_ts: from, limit: 1000 } })
-            .then((r) => (Array.isArray(r.data) ? r.data : r.data?.items ?? []).length),
+            .then((r) => {
+              const its: EmsEvent[] = Array.isArray(r.data) ? r.data : r.data?.items ?? [];
+              // M-PM-306：最近異常 widget — 取 warn/error 前 6 筆（已 ts DESC）
+              const anomalies = its.filter((e) => ['error', 'warn', 'warning', 'critical', 'fatal'].includes((e.severity ?? '').toLowerCase()));
+              setRecentEvents((anomalies.length ? anomalies : its).slice(0, 6));
+              return its.length;
+            }),
         ),
       ]);
       setStats({ edges, devices, deviceModels, events24h });
@@ -131,8 +163,39 @@ export default function Dashboard() {
           </Card>
         </Col>
         <Col xs={12} md={6}>
-          <Card>
+          <Card hoverable onClick={() => navigate('/events')} style={{ cursor: 'pointer' }}>
             <Statistic title="24h 事件" value={stats.events24h} prefix={<BellOutlined />} />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* M-PM-306：最近異常 widget */}
+      <Row style={{ marginTop: 16 }}>
+        <Col span={24}>
+          <Card
+            size="small"
+            title={<Space size={6}><WarningOutlined style={{ color: '#fa8c16' }} /><Text strong>最近異常</Text></Space>}
+            extra={<Button type="link" size="small" onClick={() => navigate('/events')}>查看全部 →</Button>}
+          >
+            {recentEvents.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="近 24 小時無異常事件" />
+            ) : (
+              <List
+                size="small"
+                dataSource={recentEvents}
+                renderItem={(e) => (
+                  <List.Item style={{ cursor: 'pointer' }} onClick={() => navigate('/events')}>
+                    <Space size={8} wrap style={{ width: '100%' }}>
+                      <Tag color={sevColor(e.severity)} style={{ marginRight: 0 }}>{e.severity ?? '—'}</Tag>
+                      <Text style={{ fontSize: 12, color: '#888', minWidth: 150 }}>{fmtTs(e.ts)}</Text>
+                      <Text code style={{ fontSize: 12 }}>{e.event_kind}</Text>
+                      {e.edge_id && <Text type="secondary" style={{ fontSize: 12 }}>{e.edge_id}</Text>}
+                      <Text style={{ fontSize: 12 }}>{e.message ?? ''}</Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            )}
           </Card>
         </Col>
       </Row>

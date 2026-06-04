@@ -14,6 +14,7 @@ import IrDevices from './pages/IrDevices';
 import ThermalView from './pages/ThermalView';
 import RemoteIO from './pages/RemoteIO';   // M-PM-240 Phase A: 遠端 I/O 監控頁（mock 階段）
 import IOSettings from './pages/IOSettings';  // M-PM-289 §B: 遠端 I/O 設定頁
+import AnomalyHistory from './pages/AnomalyHistory';  // M-PM-306: 異常履歷頁
 
 const { Title, Paragraph } = Typography;
 
@@ -69,6 +70,7 @@ export default function App() {
           <Route path="/thermal/all" element={<ThermalView />} />
           <Route path="/io" element={<RemoteIO />} />
           <Route path="/io-settings" element={<IOSettings />} />  {/* M-PM-289 §B */}
+          <Route path="/events" element={<AnomalyHistory />} />  {/* M-PM-306 */}
           <Route path="/reports" element={<Reports />} />
           <Route path="/trends" element={<Trends />} />
           <Route path="/config" element={<ConfigPlaceholder />} />
