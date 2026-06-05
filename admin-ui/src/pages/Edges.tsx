@@ -236,7 +236,7 @@ export default function Edges() {
       title: 'Edge ID',
       dataIndex: 'edge_id',
       key: 'edge_id',
-      width: 180,
+      width: 150,
       fixed: 'left',
       render: (id: string, record) => (
         <Button type="link" onClick={() => setDrawerEdge(record)} style={{ padding: 0, height: 'auto' }}>
@@ -252,7 +252,7 @@ export default function Edges() {
       title: '主機系統名稱',
       dataIndex: 'hostname',
       key: 'hostname',
-      width: 180,
+      width: 150,
       render: (v: string | null, record) => (
         <Text
           editable={{
@@ -298,7 +298,7 @@ export default function Edges() {
       title: '設備名稱代號',
       dataIndex: 'edge_name',
       key: 'edge_name',
-      width: 200,
+      ellipsis: true,
       render: (v: string | null, record) => (
         <Text
           editable={{
@@ -323,7 +323,7 @@ export default function Edges() {
       title: '指紋 (前 16)',
       dataIndex: 'fingerprint',
       key: 'fingerprint',
-      width: 180,
+      width: 160,
       render: (fp: string | null) => (
         <Tooltip title={fp ?? '尚未 enroll'}>
           <Text code style={{ fontSize: 12 }}>{shortFp(fp)}</Text>
@@ -369,7 +369,7 @@ export default function Edges() {
       title: '操作',
       key: 'actions',
       fixed: 'right',
-      width: 340,
+      width: 300,
       render: (_, edge) => {
         const canApprove = edge.status === 'pending' || edge.status === 'pending_replace';
         const canRevoke = edge.status === 'approved' || edge.status === 'maintenance';
@@ -493,7 +493,7 @@ export default function Edges() {
         dataSource={edges ?? []}
         columns={columns}
         pagination={{ pageSize: 20, showSizeChanger: true }}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1400 }}
         size="middle"
         expandable={{
           expandedRowRender: (record) => <EdgeDevicesTable edgeId={record.edge_id} />,
