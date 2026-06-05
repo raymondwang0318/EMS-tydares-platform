@@ -110,7 +110,24 @@ async def post_config_ack(
     return ConfigAckResponse(status="ok")
 
 
-# ========== Edge 主機健康心跳（edge 溫度採集紀錄 Phase 1）==========
+# ========== Edge 主機健康心跳（edge 溫度採集紀錄 Phase 1）+ 溫度告警（Phase 2）==========
+
+# CPU 溫度告警閾值（依 Raspberry Pi 4B 原廠 datasheet；thermal_zone0=晶片溫度）
+#   80°C：起始降頻（throttle）→ warn
+#   85°C：強制節流（force throttle，原廠上限）→ critical
+CPU_TEMP_WARN_C = 80.0
+CPU_TEMP_CRIT_C = 85.0
+
+
+def _cpu_temp_level(t: float | None) -> str:
+    if t is None:
+        return "unknown"
+    if t >= CPU_TEMP_CRIT_C:
+        return "crit"
+    if t >= CPU_TEMP_WARN_C:
+        return "warn"
+    return "normal"
+
 
 class EdgeHeartbeatRequest(BaseModel):
     """Edge 主機健康心跳 body（Phase 1 先收 CPU 核心溫度；extra 供未來 disk/uptime 擴充）。"""
@@ -128,15 +145,29 @@ async def post_edge_heartbeat(
 ):
     """Edge 主機健康心跳 — 寫入 ems_edge_heartbeat（payload_json 帶 cpu_temp_c）。
 
-    Phase 1（edge 核心溫度採集紀錄）：純 INSERT，不碰既有 ingest/config-sync/auth 邏輯。
-    隔離端點；verify_edge 認證。Phase 2 再做告警判斷 + UI 顯示。
+    Phase 1：INSERT ems_edge_heartbeat。
+    Phase 2（溫度告警）：比對前一筆溫度做「跨越偵測」，跨越 80/85°C 才寫 ems_events
+      （避免每 60s 洗版）→ 事件履歷頁可見。隔離端點；不碰既有 ingest/config-sync/auth。
     """
     if edge.edge_id != edge_id:
         raise HTTPException(status_code=403, detail="edge_id mismatch with token")
 
+    cur_temp = body.cpu_temp_c
+
+    # Phase 2：先取前一筆溫度（INSERT 前），供跨越偵測
+    prev_temp: float | None = None
+    if cur_temp is not None:
+        row = (await db.execute(text("""
+            SELECT (payload_json->>'cpu_temp_c')::float
+            FROM ems_edge_heartbeat
+            WHERE edge_id = :edge_id AND payload_json ? 'cpu_temp_c'
+            ORDER BY hb_ts DESC LIMIT 1
+        """), {"edge_id": edge_id})).fetchone()
+        prev_temp = row[0] if row else None
+
     payload: dict[str, Any] = {}
-    if body.cpu_temp_c is not None:
-        payload["cpu_temp_c"] = body.cpu_temp_c
+    if cur_temp is not None:
+        payload["cpu_temp_c"] = cur_temp
     if body.extra:
         payload.update(body.extra)
 
@@ -148,6 +179,27 @@ async def post_edge_heartbeat(
         "ip": get_client_ip(request),
         "payload": json.dumps(payload),
     })
+
+    # Phase 2：跨越偵測 → 寫 ems_events（event_kind=edge_lifecycle；事件履歷頁可見）
+    if cur_temp is not None:
+        cur_lv, prev_lv = _cpu_temp_level(cur_temp), _cpu_temp_level(prev_temp)
+        evt: dict[str, str] | None = None
+        # 向上跨越（往更嚴重）才告警；同級不重發 → 防洗版
+        if cur_lv == "crit" and prev_lv != "crit":
+            evt = {"sev": "critical", "msg": f"CPU 溫度危險：{cur_temp:.1f}°C（已達 85°C 強制節流）"}
+        elif cur_lv == "warn" and prev_lv == "normal":
+            evt = {"sev": "warn", "msg": f"CPU 溫度過高：{cur_temp:.1f}°C（已達 80°C 起始降頻）"}
+        elif cur_lv == "normal" and prev_lv in ("warn", "crit"):
+            evt = {"sev": "info", "msg": f"CPU 溫度恢復正常：{cur_temp:.1f}°C"}
+        if evt is not None:
+            await db.execute(text("""
+                INSERT INTO ems_events (ts, event_kind, severity, edge_id, message, data_json)
+                VALUES (NOW(), 'edge_lifecycle', :sev, :edge_id, :msg, CAST(:data AS JSONB))
+            """), {
+                "sev": evt["sev"], "edge_id": edge_id, "msg": evt["msg"],
+                "data": json.dumps({"cpu_temp_c": cur_temp, "prev_cpu_temp_c": prev_temp}),
+            })
+
     await db.commit()
     return {"status": "ok", "edge_id": edge_id, "recorded": payload}
 
