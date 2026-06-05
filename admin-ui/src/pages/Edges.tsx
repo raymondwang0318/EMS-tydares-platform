@@ -347,11 +347,17 @@ export default function Edges() {
       align: 'right',
       render: (t: number | null, record) => {
         if (t == null) return <Text type="secondary">—</Text>;
-        // 顏色分級：<70 正常 / 70-80 偏高 / >80 過熱
-        const color = t >= 80 ? '#cf1322' : t >= 70 ? '#fa8c16' : '#3f8600';
+        // 分級依 Raspberry Pi 4B 原廠 datasheet（晶片溫度 thermal_zone0）：
+        //   <70 正常 / 70-80 偏高（接近降頻）/ 80-85 過熱（80°C 起降頻 throttle）/ ≥85 危險（強制節流）
+        const lv =
+          t >= 85 ? { color: '#820014', tip: '危險：已達 85°C 強制節流（原廠上限）' } :
+          t >= 80 ? { color: '#cf1322', tip: '過熱：已達 80°C 起始降頻（throttle）' } :
+          t >= 70 ? { color: '#fa8c16', tip: '偏高：接近 80°C 降頻點；環境溫度可能逼近原廠建議 50°C 上限' } :
+                    { color: '#3f8600', tip: '正常：晶片溫度遠低於 80°C 降頻點' };
+        const sampledAt = record.cpu_temp_at ? `\n取樣：${formatTime(record.cpu_temp_at)}` : '';
         return (
-          <Tooltip title={record.cpu_temp_at ? `取樣：${formatTime(record.cpu_temp_at)}` : ''}>
-            <Text strong style={{ color }}>{t.toFixed(1)} °C</Text>
+          <Tooltip title={`${lv.tip}${sampledAt}`}>
+            <Text strong style={{ color: lv.color }}>{t.toFixed(1)} °C</Text>
           </Tooltip>
         );
       },
