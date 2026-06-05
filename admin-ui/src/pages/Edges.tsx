@@ -339,6 +339,25 @@ export default function Edges() {
       render: (v: number) => <Badge count={v} showZero color="#1677ff" overflowCount={9999} />,
     },
     {
+      // M-PM-306 衍生：edge 核心 CPU 溫度（edge_host_monitor 每 60s 上報）
+      title: '核心溫度',
+      dataIndex: 'cpu_temp_c',
+      key: 'cpu_temp_c',
+      width: 110,
+      align: 'right',
+      render: (t: number | null, record) => {
+        if (t == null) return <Text type="secondary">—</Text>;
+        // 顏色分級：<70 正常 / 70-80 偏高 / >80 過熱
+        const color = t >= 80 ? '#cf1322' : t >= 70 ? '#fa8c16' : '#3f8600';
+        return (
+          <Tooltip title={record.cpu_temp_at ? `取樣：${formatTime(record.cpu_temp_at)}` : ''}>
+            <Text strong style={{ color }}>{t.toFixed(1)} °C</Text>
+          </Tooltip>
+        );
+      },
+      sorter: (a, b) => (a.cpu_temp_c ?? -1) - (b.cpu_temp_c ?? -1),
+    },
+    {
       title: '最近上線',
       dataIndex: 'last_seen_at',
       key: 'last_seen_at',

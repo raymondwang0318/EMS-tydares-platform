@@ -83,6 +83,20 @@ def _cache_invalidate_all() -> None:
 @router.get("/edges")
 async def list_edges(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(EmsEdge).order_by(EmsEdge.edge_id))).scalars().all()
+    # edge 核心溫度（M-PM-306 衍生 Phase 2）：帶出各 edge 最新 CPU 溫度
+    # （ems_edge_heartbeat.payload_json.cpu_temp_c；edge_host_monitor 每 60s 寫入）
+    temp_rows = (await db.execute(text("""
+        SELECT DISTINCT ON (edge_id) edge_id,
+               (payload_json->>'cpu_temp_c')::float AS cpu_temp_c,
+               hb_ts
+        FROM ems_edge_heartbeat
+        WHERE payload_json ? 'cpu_temp_c'
+        ORDER BY edge_id, hb_ts DESC
+    """))).fetchall()
+    temp_map = {
+        r[0]: {"cpu_temp_c": r[1], "cpu_temp_at": r[2].isoformat() if r[2] else None}
+        for r in temp_rows
+    }
     return [
         {
             "edge_id": e.edge_id,
@@ -93,6 +107,8 @@ async def list_edges(db: AsyncSession = Depends(get_db)):
             "config_version": e.config_version,
             "fingerprint": (e.fingerprint or "")[:16],
             "previous_fingerprints": e.previous_fingerprints or [],
+            "cpu_temp_c": temp_map.get(e.edge_id, {}).get("cpu_temp_c"),
+            "cpu_temp_at": temp_map.get(e.edge_id, {}).get("cpu_temp_at"),
             "last_seen_at": e.last_seen_at.isoformat() if e.last_seen_at else None,
             "last_seen_ip": e.last_seen_ip,
             "registered_at": e.registered_at.isoformat() if e.registered_at else None,
@@ -258,8 +274,12 @@ _DEVICE_KIND_MAP = {
     "cpm12d": "modbus_meter",
     "cpm23": "modbus_meter",
     "aem_drb": "modbus_meter",
-    "tcs300b03": "modbus_meter",
-    "tcs300b04": "modbus_meter",   # M-P10D-017/018 2026-05-28: DO driver 補入
+    # TCS300B03 DI（scanner 回 "tcs300b03_di"；舊 confirm 回 "tcs300b03"；兩者皆 map 到正確 kind）
+    "tcs300b03": "tcs300b03_di",
+    "tcs300b03_di": "tcs300b03_di",
+    # TCS300B04 DO（scanner 回 "tcs300b04_do"；舊 confirm 回 "tcs300b04"；兩者皆 map 到正確 kind）
+    "tcs300b04": "tcs300b04_do",
+    "tcs300b04_do": "tcs300b04_do",
 }
 
 

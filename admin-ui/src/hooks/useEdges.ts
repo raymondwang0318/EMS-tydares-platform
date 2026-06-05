@@ -13,6 +13,8 @@ export interface Edge {
   last_seen_ip: string | null;
   last_seen_at: string | null;
   config_version: number;
+  cpu_temp_c: number | null;       // M-PM-306 衍生：edge 核心 CPU 溫度（最新 heartbeat）
+  cpu_temp_at: string | null;      // 該溫度取樣時間
   registered_at: string | null;
   approved_at: string | null;
   approved_by: string | null;
