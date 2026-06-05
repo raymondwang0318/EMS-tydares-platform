@@ -331,10 +331,10 @@ export default function Edges() {
       ),
     },
     {
-      title: 'config_version',
+      title: '設定版本',
       dataIndex: 'config_version',
       key: 'config_version',
-      width: 130,
+      width: 110,
       align: 'right',
       render: (v: number) => <Badge count={v} showZero color="#1677ff" overflowCount={9999} />,
     },
