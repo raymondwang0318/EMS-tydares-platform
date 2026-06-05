@@ -38,8 +38,8 @@ const menuItems = [
   { key: '/billing', icon: <DollarOutlined />, label: '電價規則' },
   { key: '/ir-devices', icon: <FireOutlined />, label: 'IR 標籤管理' },
   { key: '/thermal/all', icon: <CameraOutlined />, label: '熱力圖即時監控' },
-  // M-PM-306：異常履歷頁（ems_events 運維+應用層事件）
-  { key: '/events', icon: <WarningOutlined />, label: '異常履歷' },
+  // M-PM-306：事件履歷頁（ems_events 運維+應用層事件；預設顯示 error）
+  { key: '/events', icon: <WarningOutlined />, label: '事件履歷' },
   // M-PM-289：§A 改名「遠端 I/O 操作」；§B 新增「遠端 I/O 設定」
   { key: '/io', icon: <ApiOutlined />, label: '遠端 I/O 操作' },
   { key: '/io-settings', icon: <ControlOutlined />, label: '遠端 I/O 設定' },

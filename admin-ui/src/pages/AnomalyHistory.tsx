@@ -88,7 +88,7 @@ const fmtTs = (ts: string): string => {
 export default function AnomalyHistory() {
   const navigate = useNavigate();
   const [range, setRange] = useState<TimeRange>('24h');
-  const [severity, setSeverity] = useState<string>(ALL);
+  const [severity, setSeverity] = useState<string>('error');  // 老王 2026-06-04：預設顯示 error
   const [kind, setKind] = useState<string>(ALL);
   const [edgeId, setEdgeId] = useState<string>(ALL);
 
@@ -184,10 +184,10 @@ export default function AnomalyHistory() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 12 }} align="start">
         <div>
           <Title level={3} style={{ margin: 0 }}>
-            <WarningOutlined /> 異常履歷
+            <WarningOutlined /> 事件履歷
           </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            系統運維 + 應用層事件（ems_events）；點設備可跳轉；展開列看原始資料
+            系統運維 + 應用層事件（ems_events）；預設顯示錯誤，可調嚴重度；點設備可跳轉；展開列看原始資料
           </Text>
         </div>
         <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>重新整理</Button>
