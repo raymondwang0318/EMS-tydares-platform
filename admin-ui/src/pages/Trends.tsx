@@ -69,6 +69,12 @@ const POWER_PARAM_SET = new Set([
   'bb1_3_p_sum', 'bb4_6_p_sum', 'bb7_9_p_sum', 'bb10_12_p_sum',
 ]);
 
+// 需量 (Demand P) 相關 parameter_code（老王 2026-06-04「完成需量顯示」；
+// backend ECSU mapping M-P12-063 Phase C 已含 map_circuit_to_demand_param）
+const DEMAND_PARAM_SET = new Set([
+  'demand_p_total', 'demand_p_sum', 'ma_p_dm', 'mb_p_dm',
+]);
+
 export default function Trends() {
   const [range, setRange] = useState<[Dayjs, Dayjs]>([dayjs().subtract(24, 'hour'), dayjs()]);
   const [granularity, setGranularity] = useState<Granularity>('15min');
@@ -137,6 +143,25 @@ export default function Trends() {
       .map(([ts, v]) => ({
         ts: dayjs(ts).format(granularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm'),
         power: v,
+      }));
+  }, [energyData, granularity]);
+
+  // 需量趨勢資料（老王 2026-06-04「完成需量顯示」；聚合 ECSU 所有 demand 變體）
+  const demandChartData = useMemo(() => {
+    if (!energyData?.points?.length) return [] as { ts: string; demand: number | null }[];
+    const map = new Map<string, number>();
+    energyData.points.forEach((p) => {
+      if (DEMAND_PARAM_SET.has(p.parameter_code)) {
+        const v = p.avg_value ?? p.last_value ?? null;
+        if (v == null) return;
+        map.set(p.ts, (map.get(p.ts) ?? 0) + v);
+      }
+    });
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([ts, v]) => ({
+        ts: dayjs(ts).format(granularity === '1day' ? 'MM-DD' : 'MM-DD HH:mm'),
+        demand: v,
       }));
   }, [energyData, granularity]);
 
@@ -226,18 +251,24 @@ export default function Trends() {
         )}
       </Card>
 
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginTop: 8 }}
-        message="需量 (Demand P/Q/S) chart 暫不顯示"
-        description={
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            backend ECSU mapping layer（M-P12-061 §3.2）對 demand metric 無 mapping coverage；
-            老王 5/21 拍板 1 對齊「Demand 不改」精神。
-          </Text>
-        }
-      />
+      <Card title="需量趨勢（需量 P, W；ECSU 聚合）" size="small" style={{ marginTop: 8 }}>
+        {energyLoading ? (
+          <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+        ) : demandChartData.length === 0 ? (
+          <Empty description={queriedRange ? '時段內無需量資料' : '請按「查詢」載入資料'} />
+        ) : (
+          <ResponsiveContainer width="100%" height={320}>
+            <LineChart data={demandChartData} margin={{ top: 8, right: 24, left: 0, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="ts" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Line type="monotone" dataKey="demand" name="需量 P (W)" stroke="#fa8c16" dot={false} strokeWidth={2} />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
     </div>
   );
 }
