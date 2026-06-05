@@ -10,6 +10,7 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import api from '../services/api';
+import { humanizeMessage, kindLabel, sevLabel } from '../utils/eventHumanize';
 
 const { Title, Text } = Typography;
 
@@ -186,11 +187,11 @@ export default function Dashboard() {
                 renderItem={(e) => (
                   <List.Item style={{ cursor: 'pointer' }} onClick={() => navigate('/events')}>
                     <Space size={8} wrap style={{ width: '100%' }}>
-                      <Tag color={sevColor(e.severity)} style={{ marginRight: 0 }}>{e.severity ?? '—'}</Tag>
+                      <Tag color={sevColor(e.severity)} style={{ marginRight: 0 }}>{sevLabel(e.severity)}</Tag>
                       <Text style={{ fontSize: 12, color: '#888', minWidth: 150 }}>{fmtTs(e.ts)}</Text>
-                      <Text code style={{ fontSize: 12 }}>{e.event_kind}</Text>
+                      <Text style={{ fontSize: 12 }}>{kindLabel(e.event_kind)}</Text>
                       {e.edge_id && <Text type="secondary" style={{ fontSize: 12 }}>{e.edge_id}</Text>}
-                      <Text style={{ fontSize: 12 }}>{e.message ?? ''}</Text>
+                      <Text style={{ fontSize: 12 }}>{humanizeMessage(e.message)}</Text>
                     </Space>
                   </List.Item>
                 )}

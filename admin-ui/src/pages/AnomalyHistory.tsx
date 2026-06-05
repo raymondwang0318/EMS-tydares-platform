@@ -14,13 +14,14 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Typography, Card, Table, Tag, Select, Segmented, Space, Button, Alert,
+  Typography, Card, Table, Tag, Select, Segmented, Space, Button, Alert, Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import api from '../services/api';
 import { useEdges } from '../hooks/useEdges';
+import { humanizeMessage, kindLabel, sevLabel } from '../utils/eventHumanize';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -151,11 +152,13 @@ export default function AnomalyHistory() {
     },
     {
       title: '嚴重度', dataIndex: 'severity', width: 90,
-      render: (s: string | null) => <Tag color={sevColor(s)}>{s ?? '—'}</Tag>,
+      render: (s: string | null) => <Tag color={sevColor(s)}>{sevLabel(s)}</Tag>,
     },
     {
-      title: '類型', dataIndex: 'event_kind', width: 160,
-      render: (k: string) => <Text code style={{ fontSize: 12 }}>{k}</Text>,
+      title: '類型', dataIndex: 'event_kind', width: 130,
+      render: (k: string) => (
+        <Tooltip title={k}><span style={{ fontSize: 12 }}>{kindLabel(k)}</span></Tooltip>
+      ),
     },
     {
       title: 'Edge', dataIndex: 'edge_id', width: 130,
@@ -170,7 +173,9 @@ export default function AnomalyHistory() {
     },
     {
       title: '訊息', dataIndex: 'message', ellipsis: true,
-      render: (m: string | null) => <Text style={{ fontSize: 12 }}>{m ?? '—'}</Text>,
+      render: (m: string | null) => (
+        <Tooltip title={m || ''}><Text style={{ fontSize: 12 }}>{humanizeMessage(m)}</Text></Tooltip>
+      ),
     },
   ];
 
