@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Badge, Tag, Spin } from 'antd';
+import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Tag, Spin } from 'antd';
 import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined, ClearOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { StatusTag } from '../components/common/StatusTag';
@@ -330,14 +330,7 @@ export default function Edges() {
         </Tooltip>
       ),
     },
-    {
-      title: '設定版本',
-      dataIndex: 'config_version',
-      key: 'config_version',
-      width: 110,
-      align: 'right',
-      render: (v: number) => <Badge count={v} showZero color="#1677ff" overflowCount={9999} />,
-    },
+    // 設定版本欄：老王 2026-06-04 明示隱藏不顯示（資料仍在 API/Edge type，需要時可恢復）
     {
       // M-PM-306 衍生：edge 核心 CPU 溫度（edge_host_monitor 每 60s 上報）
       title: '核心溫度',
@@ -499,7 +492,7 @@ export default function Edges() {
         dataSource={edges ?? []}
         columns={columns}
         pagination={{ pageSize: 20, showSizeChanger: true }}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1290 }}
         size="middle"
         expandable={{
           expandedRowRender: (record) => <EdgeDevicesTable edgeId={record.edge_id} />,
