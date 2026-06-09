@@ -57,6 +57,17 @@ function RealtimeKwCell({ ecsuId }: { ecsuId: number }) {
   return <Text style={{ color, fontFamily: 'monospace' }}>{v.toFixed(2)}</Text>;
 }
 
+// 電壓欄（老王 2026-06-08）：快速判斷電表存活參考；多綁定取最高電壓（voltage_max；不平均）
+function VoltageCell({ ecsuId }: { ecsuId: number }) {
+  const { data, isLoading } = useEcsuRealtime(ecsuId);
+  if (isLoading) return <Spin size="small" />;
+  const v = data?.voltage_max;
+  if (v == null) return <Text type="secondary">—</Text>;
+  // 有電壓讀數（>50V）→ 電表在線綠；過低 → 異常橘
+  const color = v > 50 ? '#4caf50' : '#ff9800';
+  return <Text style={{ color, fontFamily: 'monospace' }}>{v.toFixed(0)} V</Text>;
+}
+
 function MonthlyKwhCell({ ecsuId }: { ecsuId: number }) {
   const { data, isLoading } = useEcsuMonthly(ecsuId);
   if (isLoading) return <Spin size="small" />;
@@ -86,6 +97,7 @@ export default function Ecsu() {
     }
     interface ExportRow extends EcsuRow {
       _circuits_count: number | null;
+      _voltage_max: number | null;
       _realtime_kw: number | null;
       _monthly_kwh: number | null;
     }
@@ -98,6 +110,7 @@ export default function Ecsu() {
       return {
         ...r,
         _circuits_count: c?.count ?? null,
+        _voltage_max: rt?.voltage_max ?? null,
         _realtime_kw: rt?.realtime_kw ?? null,
         _monthly_kwh: mo?.monthly_kwh ?? null,
       };
@@ -110,6 +123,11 @@ export default function Ecsu() {
       { key: 'ecsu_name', header: '名稱' },
       { key: 'parent_id', header: '上層 ID', render: (r) => r.parent_id ?? '—' },
       { key: '_circuits_count', header: '綁定迴路數', render: (r) => r._circuits_count ?? '—' },
+      {
+        key: '_voltage_max',
+        header: '電壓 (V)',
+        render: (r) => (r._voltage_max == null ? '—' : r._voltage_max.toFixed(0)),
+      },
       {
         key: '_realtime_kw',
         header: '即時 (kW)',
@@ -328,6 +346,14 @@ export default function Ecsu() {
       width: 90,
       align: 'right',
       render: (_: unknown, row) => <CircuitsCountCell ecsuId={row.ecsu_id} />,
+    },
+    {
+      // 電壓欄（老王 2026-06-08）：快速判斷電表存活參考；多綁定取最高電壓（不平均）
+      title: '電壓 (V)',
+      key: 'voltage_max',
+      width: 90,
+      align: 'right',
+      render: (_: unknown, row) => <VoltageCell ecsuId={row.ecsu_id} />,
     },
     {
       title: '即時 (kW)',

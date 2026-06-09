@@ -36,6 +36,7 @@ from app.constants.device_circuits import (
     get_circuits,
     map_circuit_to_energy_param,
     map_circuit_to_power_param,
+    map_circuit_to_voltage_param,
 )
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(verify_admin_token)])
@@ -1130,6 +1131,7 @@ async def ecsu_realtime(
     total_kw = 0.0
     active = 0
     binding_details: list[dict[str, Any]] = []
+    voltages: list[float] = []  # 電表存活參考；多綁定取 MAX 不平均（老王 2026-06-08）
 
     for b in bindings:
         param = map_circuit_to_power_param(b.circuit_code, b.device_id)
@@ -1148,6 +1150,19 @@ async def ecsu_realtime(
             total_kw += b.sign * value_kw
             active += 1
 
+        # 電壓取值（判斷電表存活參考）— 比照 power，取該 binding 對應電表 v_avg 最新值
+        vparam = map_circuit_to_voltage_param(b.circuit_code, b.device_id)
+        vlatest = (await db.execute(text("""
+            SELECT value FROM trx_reading
+            WHERE device_id = :device_id
+              AND parameter_code = :param_code
+              AND ts > NOW() - INTERVAL '5 minutes'
+            ORDER BY ts DESC LIMIT 1
+        """), {"device_id": b.device_id, "param_code": vparam})).fetchone()
+        v_val = float(vlatest[0]) if vlatest is not None and vlatest[0] is not None else None
+        if v_val is not None:
+            voltages.append(v_val)
+
         binding_details.append({
             "assgn_id": b.assgn_id,
             "device_id": b.device_id,
@@ -1155,6 +1170,7 @@ async def ecsu_realtime(
             "parameter_code": param,
             "sign": b.sign,
             "value_kw": value_kw,
+            "voltage": v_val,
         })
 
     result = {
@@ -1162,6 +1178,7 @@ async def ecsu_realtime(
         "ecsu_code": ecsu.ecsu_code,
         "ecsu_name": ecsu.ecsu_name,
         "realtime_kw": total_kw,
+        "voltage_max": max(voltages) if voltages else None,  # 多綁定取最高電壓（不平均）；電表存活參考
         "active_bindings": active,
         "total_bindings": len(bindings),
         "window": "5min",

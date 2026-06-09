@@ -50,6 +50,7 @@ export interface EcsuCircuitsResp {
 export interface EcsuRealtimeResp {
   ecsu_id: number;
   realtime_kw: number;
+  voltage_max: number | null;  // 電表存活參考；多綁定取最高電壓（不平均；老王 2026-06-08）
   active_bindings: number;
   window: '5min';
   parameter_code: 'power_total';
