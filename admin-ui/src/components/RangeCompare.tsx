@@ -5,6 +5,8 @@
  * - ECSU 多選 dropdown + 全選 / 清空
  * - Table（ECSU × 期間A × 期間B × Δ kWh × Δ%）+ 總計列 + recharts 雙柱 Bar chart
  * - Excel + CSV 匯出（useReportExport 同 lib）
+ * - 單期間累積模式（老王 2026-06-10 更新需求）：期間 A = 期間 B（同日範圍）時
+ *   自動切換為「該週期總累積數據」報表（單欄 kWh + 單柱圖 + 單次查詢），免另做分頁
  *
  * 資料：對每選中 ECSU × 2 期間呼叫既建 GET /v1/reports/energy
  *   ?granularity=1day&ecsu_id=N（backend 自動 force group_by=ecsu + binding mapped params，
@@ -104,6 +106,12 @@ export default function RangeCompare() {
   const [progress, setProgress] = useState<[number, number] | null>(null);
   const [queried, setQueried] = useState(false);
 
+  // 單期間累積模式：A=B（同日範圍）→ 顯示該週期總累積（老王 2026-06-10）
+  const samePeriod =
+    periodA[0].isSame(periodB[0], 'day') && periodA[1].isSame(periodB[1], 'day');
+  // 查詢結果的模式快照（避免查詢後改期間導致表頭/資料不一致）
+  const [resultSame, setResultSame] = useState(false);
+
   // 快速期間按鈕
   const applyYoY = () => {
     const lm = dayjs().subtract(1, 'month');
@@ -117,6 +125,12 @@ export default function RangeCompare() {
     setPeriodA([prevQ, prevQ.add(2, 'month').endOf('month')]);
     setPeriodB([curQ, dayjs()]); // 當季至今
   };
+  // 單期間累積：A=B=當月至今（一鍵進累積模式）
+  const applyMonthTotal = () => {
+    const r: RangeVal = [dayjs().startOf('month'), dayjs()];
+    setPeriodA(r);
+    setPeriodB(r);
+  };
 
   const runCompare = async () => {
     if (selectedIds.length === 0) {
@@ -125,9 +139,10 @@ export default function RangeCompare() {
     }
     setLoading(true);
     setQueried(true);
+    setResultSame(samePeriod);
     const byId = new Map((ecsuRows ?? []).map((r) => [r.ecsu_id, r]));
     const tasks = selectedIds.map((id) => ({ id, meta: byId.get(id) }));
-    const total = tasks.length * 2;
+    const total = tasks.length * (samePeriod ? 1 : 2); // 累積模式單次查詢
     let done = 0;
     setProgress([0, total]);
     const out: CompareRow[] = [];
@@ -138,8 +153,13 @@ export default function RangeCompare() {
         chunk.map(async ({ id, meta }) => {
           const kwhA = await fetchPeriodKwh(id, periodA);
           done += 1; setProgress([done, total]);
-          const kwhB = await fetchPeriodKwh(id, periodB);
-          done += 1; setProgress([done, total]);
+          let kwhB: number | null;
+          if (samePeriod) {
+            kwhB = kwhA; // 累積模式：同期間免重查
+          } else {
+            kwhB = await fetchPeriodKwh(id, periodB);
+            done += 1; setProgress([done, total]);
+          }
           const delta = kwhA != null && kwhB != null ? kwhB - kwhA : null;
           const deltaPct = kwhA != null && kwhB != null && Math.abs(kwhA) > 0.0001
             ? ((kwhB - kwhA) / Math.abs(kwhA)) * 100 : null;
@@ -179,32 +199,53 @@ export default function RangeCompare() {
   const labelA = `${periodA[0].format('YYYY/MM/DD')}–${periodA[1].format('YYYY/MM/DD')}`;
   const labelB = `${periodB[0].format('YYYY/MM/DD')}–${periodB[1].format('YYYY/MM/DD')}`;
 
-  const columns: ColumnsType<CompareRow> = [
+  const baseCols: ColumnsType<CompareRow> = [
     { title: '代碼', dataIndex: 'ecsu_code', key: 'code', width: 100 },
     { title: '區域', dataIndex: 'region', key: 'region', width: 110, render: (v) => v || <Text type="secondary">—</Text> },
     { title: '名稱', dataIndex: 'ecsu_name', key: 'name', ellipsis: true },
-    { title: `期間A (kWh)`, key: 'kwhA', width: 130, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace' }}>{fmtKwh(r.kwhA)}</Text> },
-    { title: `期間B (kWh)`, key: 'kwhB', width: 130, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace' }}>{fmtKwh(r.kwhB)}</Text> },
-    { title: 'Δ kWh', key: 'delta', width: 120, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace', color: deltaColor(r.delta) }}>{r.delta == null ? '—' : `${r.delta > 0 ? '+' : ''}${r.delta.toFixed(1)}`}</Text> },
-    { title: 'Δ %', key: 'pct', width: 100, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace', color: deltaColor(r.delta) }}>{fmtPct(r.deltaPct)}</Text> },
   ];
+  // 比較模式 5 欄 / 累積模式單欄（resultSame 依查詢時快照）
+  const columns: ColumnsType<CompareRow> = resultSame
+    ? [
+        ...baseCols,
+        { title: '累積用電 (kWh)', key: 'kwhA', width: 160, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace' }}>{fmtKwh(r.kwhA)}</Text> },
+      ]
+    : [
+        ...baseCols,
+        { title: `期間A (kWh)`, key: 'kwhA', width: 130, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace' }}>{fmtKwh(r.kwhA)}</Text> },
+        { title: `期間B (kWh)`, key: 'kwhB', width: 130, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace' }}>{fmtKwh(r.kwhB)}</Text> },
+        { title: 'Δ kWh', key: 'delta', width: 120, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace', color: deltaColor(r.delta) }}>{r.delta == null ? '—' : `${r.delta > 0 ? '+' : ''}${r.delta.toFixed(1)}`}</Text> },
+        { title: 'Δ %', key: 'pct', width: 100, align: 'right', render: (_, r) => <Text style={{ fontFamily: 'monospace', color: deltaColor(r.delta) }}>{fmtPct(r.deltaPct)}</Text> },
+      ];
 
   const chartData = useMemo(
-    () => rows.map((r) => ({ name: r.ecsu_code, 期間A: r.kwhA ?? 0, 期間B: r.kwhB ?? 0 })),
-    [rows],
+    () =>
+      rows.map((r) =>
+        resultSame
+          ? { name: r.ecsu_code, 累積用電: r.kwhA ?? 0 }
+          : { name: r.ecsu_code, 期間A: r.kwhA ?? 0, 期間B: r.kwhB ?? 0 },
+      ),
+    [rows, resultSame],
   );
 
-  const exportColumns: ExportColumn<CompareRow>[] = [
-    { key: 'ecsu_code', header: '代碼' },
-    { key: 'region', header: '區域', render: (r) => r.region ?? '' },
-    { key: 'ecsu_name', header: '名稱' },
-    { key: 'kwhA', header: `期間A ${labelA} (kWh)`, render: (r) => (r.kwhA == null ? '—' : r.kwhA.toFixed(1)) },
-    { key: 'kwhB', header: `期間B ${labelB} (kWh)`, render: (r) => (r.kwhB == null ? '—' : r.kwhB.toFixed(1)) },
-    { key: 'delta', header: '差異 (kWh)', render: (r) => (r.delta == null ? '—' : r.delta.toFixed(1)) },
-    { key: 'deltaPct', header: '差異 (%)', render: (r) => (r.deltaPct == null ? '—' : r.deltaPct.toFixed(1)) },
-  ];
+  const exportColumns: ExportColumn<CompareRow>[] = resultSame
+    ? [
+        { key: 'ecsu_code', header: '代碼' },
+        { key: 'region', header: '區域', render: (r) => r.region ?? '' },
+        { key: 'ecsu_name', header: '名稱' },
+        { key: 'kwhA', header: `累積用電 ${labelA} (kWh)`, render: (r) => (r.kwhA == null ? '—' : r.kwhA.toFixed(1)) },
+      ]
+    : [
+        { key: 'ecsu_code', header: '代碼' },
+        { key: 'region', header: '區域', render: (r) => r.region ?? '' },
+        { key: 'ecsu_name', header: '名稱' },
+        { key: 'kwhA', header: `期間A ${labelA} (kWh)`, render: (r) => (r.kwhA == null ? '—' : r.kwhA.toFixed(1)) },
+        { key: 'kwhB', header: `期間B ${labelB} (kWh)`, render: (r) => (r.kwhB == null ? '—' : r.kwhB.toFixed(1)) },
+        { key: 'delta', header: '差異 (kWh)', render: (r) => (r.delta == null ? '—' : r.delta.toFixed(1)) },
+        { key: 'deltaPct', header: '差異 (%)', render: (r) => (r.deltaPct == null ? '—' : r.deltaPct.toFixed(1)) },
+      ];
   const exportName = (ext: string) =>
-    `Tydares_區間用電比較_${dayjs().format('YYYYMMDD_HH')}.${ext}`;
+    `Tydares_${resultSame ? '期間用電累積' : '區間用電比較'}_${dayjs().format('YYYYMMDD_HH')}.${ext}`;
 
   return (
     <div>
@@ -215,7 +256,9 @@ export default function RangeCompare() {
             <Text strong>快速期間：</Text>
             <Button size="small" onClick={applyYoY}>月對月 YoY</Button>
             <Button size="small" onClick={applyQuarter}>季度比較</Button>
+            <Button size="small" onClick={applyMonthTotal}>本月累積</Button>
             <Text type="secondary" style={{ fontSize: 12 }}>（或直接於下方自訂兩個期間）</Text>
+            {samePeriod && <Tag color="blue">累積模式：兩期間相同 → 顯示該週期總累積</Tag>}
           </Space>
           <Space wrap>
             <Text>期間 A（基準）：</Text>
@@ -252,23 +295,33 @@ export default function RangeCompare() {
 
       {!queried && (
         <Alert type="info" showIcon style={{ marginBottom: 16 }}
-          message="選擇期間與 ECSU 後按「查詢比較」；期間天數不同時請自行留意比較基準" />
+          message="選擇期間與 ECSU 後按「查詢比較」；期間天數不同時請自行留意比較基準。兩期間設為相同（或按「本月累積」）= 該週期總累積數據模式" />
       )}
 
       {queried && !loading && rows.length === 0 && <Empty description="無資料" />}
 
       {rows.length > 0 && (
         <>
-          {/* 總計 KPI */}
-          <Row gutter={16} style={{ marginBottom: 16 }}>
-            <Col span={6}><Card size="small"><Statistic title={`期間A 總計 (${labelA})`} value={totals.sumA} precision={1} suffix="kWh" /></Card></Col>
-            <Col span={6}><Card size="small"><Statistic title={`期間B 總計 (${labelB})`} value={totals.sumB} precision={1} suffix="kWh" /></Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="總差異" value={totals.delta} precision={1} suffix="kWh" valueStyle={{ color: deltaColor(totals.delta) }} /></Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="總差異 %" value={totals.pct == null ? '—' : totals.pct.toFixed(1)} suffix={totals.pct == null ? '' : '%'} valueStyle={{ color: deltaColor(totals.delta) }} /></Card></Col>
-          </Row>
+          {/* 總計 KPI：累積模式單卡 / 比較模式 4 卡 */}
+          {resultSame ? (
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={8}><Card size="small"><Statistic title={`週期總累積 (${labelA})`} value={totals.sumA} precision={1} suffix="kWh" /></Card></Col>
+              <Col span={8}><Card size="small"><Statistic title="ECSU 數" value={rows.length} /></Card></Col>
+            </Row>
+          ) : (
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={6}><Card size="small"><Statistic title={`期間A 總計 (${labelA})`} value={totals.sumA} precision={1} suffix="kWh" /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title={`期間B 總計 (${labelB})`} value={totals.sumB} precision={1} suffix="kWh" /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title="總差異" value={totals.delta} precision={1} suffix="kWh" valueStyle={{ color: deltaColor(totals.delta) }} /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title="總差異 %" value={totals.pct == null ? '—' : totals.pct.toFixed(1)} suffix={totals.pct == null ? '' : '%'} valueStyle={{ color: deltaColor(totals.delta) }} /></Card></Col>
+            </Row>
+          )}
 
-          {/* Bar chart 雙柱 */}
-          <Card size="small" style={{ marginBottom: 16 }} title={<Space>雙期間對比 <Tag>期間A：{labelA}</Tag><Tag color="blue">期間B：{labelB}</Tag></Space>}>
+          {/* Bar chart：累積模式單柱 / 比較模式雙柱 */}
+          <Card size="small" style={{ marginBottom: 16 }}
+            title={resultSame
+              ? <Space>週期累積用電 <Tag color="blue">{labelA}</Tag></Space>
+              : <Space>雙期間對比 <Tag>期間A：{labelA}</Tag><Tag color="blue">期間B：{labelB}</Tag></Space>}>
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
@@ -276,8 +329,14 @@ export default function RangeCompare() {
                 <YAxis unit=" kWh" width={90} />
                 <Tooltip />
                 <Legend />
-                <Bar dataKey="期間A" fill="#8c8c8c" />
-                <Bar dataKey="期間B" fill="#1677ff" />
+                {resultSame ? (
+                  <Bar dataKey="累積用電" fill="#1677ff" />
+                ) : (
+                  <>
+                    <Bar dataKey="期間A" fill="#8c8c8c" />
+                    <Bar dataKey="期間B" fill="#1677ff" />
+                  </>
+                )}
               </BarChart>
             </ResponsiveContainer>
           </Card>
@@ -312,9 +371,13 @@ export default function RangeCompare() {
                     <Table.Summary.Row>
                       <Table.Summary.Cell index={0} colSpan={3}><Text strong>總計（{rows.length} 個 ECSU）</Text></Table.Summary.Cell>
                       <Table.Summary.Cell index={1} align="right"><Text strong style={{ fontFamily: 'monospace' }}>{totals.sumA.toFixed(1)}</Text></Table.Summary.Cell>
-                      <Table.Summary.Cell index={2} align="right"><Text strong style={{ fontFamily: 'monospace' }}>{totals.sumB.toFixed(1)}</Text></Table.Summary.Cell>
-                      <Table.Summary.Cell index={3} align="right"><Text strong style={{ fontFamily: 'monospace', color: deltaColor(totals.delta) }}>{`${totals.delta > 0 ? '+' : ''}${totals.delta.toFixed(1)}`}</Text></Table.Summary.Cell>
-                      <Table.Summary.Cell index={4} align="right"><Text strong style={{ fontFamily: 'monospace', color: deltaColor(totals.delta) }}>{totals.pct == null ? '—' : `${totals.pct > 0 ? '+' : ''}${totals.pct.toFixed(1)}%`}</Text></Table.Summary.Cell>
+                      {!resultSame && (
+                        <>
+                          <Table.Summary.Cell index={2} align="right"><Text strong style={{ fontFamily: 'monospace' }}>{totals.sumB.toFixed(1)}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell index={3} align="right"><Text strong style={{ fontFamily: 'monospace', color: deltaColor(totals.delta) }}>{`${totals.delta > 0 ? '+' : ''}${totals.delta.toFixed(1)}`}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell index={4} align="right"><Text strong style={{ fontFamily: 'monospace', color: deltaColor(totals.delta) }}>{totals.pct == null ? '—' : `${totals.pct > 0 ? '+' : ''}${totals.pct.toFixed(1)}%`}</Text></Table.Summary.Cell>
+                        </>
+                      )}
                     </Table.Summary.Row>
                   </Table.Summary>
                 )}
