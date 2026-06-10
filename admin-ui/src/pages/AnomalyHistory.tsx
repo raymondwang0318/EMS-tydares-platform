@@ -15,10 +15,11 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Typography, Card, Table, Tag, Select, Segmented, Space, Button, Alert, Tooltip,
+  Popconfirm, message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { ReloadOutlined, WarningOutlined } from '@ant-design/icons';
-import { useQuery } from '@tanstack/react-query';
+import { ReloadOutlined, WarningOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import api from '../services/api';
 import { useEdges } from '../hooks/useEdges';
 import { humanizeMessage, kindLabel, sevLabel } from '../utils/eventHumanize';
@@ -34,16 +35,18 @@ interface EmsEvent {
   ts: string;
   event_kind: string;
   severity: string | null;
+  source?: string | null;
   edge_id: string | null;
   device_id: string | null;
   command_id: string | null;
   actor: string | null;
   message: string | null;
   data_json: unknown;
+  notify_pananora?: boolean | null;
+  resolved_at?: string | null;
 }
 
 interface EventsResponse {
-  kind: string | null;
   total: number;
   items: EmsEvent[];
 }
@@ -110,8 +113,15 @@ export default function AnomalyHistory() {
 
   const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ['anomaly-events', params],
-    queryFn: () => api.get<EventsResponse>('/reports/events', { params }).then((r) => r.data),
+    queryFn: () => api.get<EventsResponse>('/admin/events', { params }).then((r) => r.data),
     refetchInterval: 30_000,
+  });
+
+  // M-PM-313 P4：手動標記事件已解除（POST /v1/admin/events/{id}/resolve）
+  const resolveMut = useMutation({
+    mutationFn: (eventId: number) => api.post(`/admin/events/${eventId}/resolve`, {}),
+    onSuccess: () => { message.success('已標記解除'); refetch(); },
+    onError: (e: any) => message.error(`標記失敗：${e?.response?.data?.detail ?? e?.message ?? '未知錯誤'}`),
   });
 
   const items = data?.items ?? [];
@@ -177,6 +187,24 @@ export default function AnomalyHistory() {
         <Tooltip title={m || ''}><Text style={{ fontSize: 12 }}>{humanizeMessage(m)}</Text></Tooltip>
       ),
     },
+    {
+      title: '處理', key: 'resolve', width: 130,
+      render: (_, e) =>
+        e.resolved_at
+          ? <Tag color="green" icon={<CheckCircleOutlined />}>已解除</Tag>
+          : (
+            <Popconfirm
+              title="標記此事件為已解除？"
+              okText="確定"
+              cancelText="取消"
+              onConfirm={() => resolveMut.mutate(e.event_id)}
+            >
+              <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }}>
+                ✅ 標記已解除
+              </Button>
+            </Popconfirm>
+          ),
+    },
   ];
 
   return (
@@ -225,11 +253,14 @@ export default function AnomalyHistory() {
         columns={columns}
         size="small"
         pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (t) => `${t} 筆` }}
+        // 表頭固定（老王 2026-06-10）：表體在視窗高度內捲動，欄名固定最上方
+        scroll={{ y: 'calc(100vh - 360px)' }}
         expandable={{
           expandedRowRender: (e) => (
             <div style={{ fontSize: 12, paddingLeft: 8 }}>
               <Space direction="vertical" size={2} style={{ width: '100%' }}>
                 <Text type="secondary">event_id: {e.event_id}　actor: {e.actor ?? '—'}　command_id: {e.command_id ?? '—'}</Text>
+                <Text type="secondary">來源: {e.source ?? '—'}　通知 Pananora: {e.notify_pananora ? '是' : '否'}　解除: {e.resolved_at ? fmtTs(e.resolved_at) : '未解除'}</Text>
                 <Text type="secondary">原始資料 (data_json)：</Text>
                 <Paragraph style={{ margin: 0 }}>
                   <pre style={{ margin: 0, fontSize: 11, background: '#fafafa', padding: 8, borderRadius: 4, maxHeight: 280, overflow: 'auto' }}>

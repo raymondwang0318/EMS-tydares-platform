@@ -113,6 +113,7 @@ export default function ModbusDevices() {
       hideDelete
       toolbarExtra={toolbarExtra}
       filterFn={filterFn}
+      scrollY="calc(100vh - 420px)"
       hintText={
         <Alert
           type="info"

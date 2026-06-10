@@ -492,7 +492,8 @@ export default function Edges() {
         dataSource={edges ?? []}
         columns={columns}
         pagination={{ pageSize: 20, showSizeChanger: true }}
-        scroll={{ x: 1290 }}
+        // 表頭固定（老王 2026-06-10）：表體在視窗高度內捲動，欄名固定最上方
+        scroll={{ x: 1290, y: 'calc(100vh - 330px)' }}
         size="middle"
         expandable={{
           expandedRowRender: (record) => <EdgeDevicesTable edgeId={record.edge_id} />,

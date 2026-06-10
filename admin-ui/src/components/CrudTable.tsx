@@ -35,6 +35,11 @@ interface CrudTableProps {
    * M-PM-176 / T-AdminUI-004 設備管理頁 Edge filter 用
    */
   filterFn?: (row: any) => boolean;
+  /**
+   * 表頭固定（老王 2026-06-10）：傳入表體高度（如 'calc(100vh - 420px)'），
+   * 表體在該高度內捲動、欄名固定最上方；未傳 = 原行為不變
+   */
+  scrollY?: string;
 }
 
 interface FormFieldDef {
@@ -56,6 +61,7 @@ export default function CrudTable({
   hintText,
   toolbarExtra,
   filterFn,
+  scrollY,
 }: CrudTableProps) {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -171,6 +177,7 @@ export default function CrudTable({
         loading={loading}
         size="middle"
         pagination={{ pageSize: 20 }}
+        scroll={scrollY ? { y: scrollY } : undefined}
       />
 
       <Modal

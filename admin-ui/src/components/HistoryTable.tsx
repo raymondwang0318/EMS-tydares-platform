@@ -57,6 +57,8 @@ export interface HistoryTableProps<T extends HistoryRow = HistoryRow> {
   onEventClick?: (event: AlertHistoryEvent, row: T) => void;
   title?: React.ReactNode;
   pageSize?: number;
+  /** 表頭固定（老王 2026-06-10）：傳入表體高度，表體內捲、欄名固定；未傳 = 原行為 */
+  scrollY?: string;
 }
 
 const TS_FORMAT_BY_GRAN: Record<Granularity, string> = {
@@ -91,6 +93,7 @@ export default function HistoryTable<T extends HistoryRow = HistoryRow>(
     onEventClick,
     title,
     pageSize = 25,
+    scrollY,
   } = props;
 
   const tsFormat = TS_FORMAT_BY_GRAN[granularity];
@@ -172,6 +175,7 @@ export default function HistoryTable<T extends HistoryRow = HistoryRow>(
           size="small"
           pagination={{ pageSize }}
           showSorterTooltip
+          scroll={scrollY ? { y: scrollY } : undefined}
         />
       )}
     </Card>

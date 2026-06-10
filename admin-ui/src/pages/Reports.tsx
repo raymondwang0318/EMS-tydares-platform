@@ -1239,6 +1239,7 @@ export default function Reports() {
                   data={energyHistoryRows}
                   loading={energyHistoryLoading}
                   granularity={energyGranularity}
+                  scrollY="calc(100vh - 320px)"
                   emptyText={energyHistoryRange ? '時段內無資料' : '請按「查詢」載入資料'}
                   title={
                     <Space>
@@ -1284,6 +1285,7 @@ export default function Reports() {
                   loading={eventsLoading}
                   size="small"
                   pagination={{ pageSize: 20 }}
+                  scroll={{ y: 'calc(100vh - 320px)' }}
                 />
               </>
             ),
@@ -1462,6 +1464,7 @@ export default function Reports() {
                       data={thermalHistoryRows}
                       loading={thermalLoading}
                       granularity={thermalGranularity}
+                      scrollY="calc(100vh - 320px)"
                       emptyText={thermalQueriedRange ? '時段內無資料' : '請按「查詢」載入資料'}
                       title={
                         <Space>
