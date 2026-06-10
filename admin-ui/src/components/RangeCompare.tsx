@@ -55,7 +55,16 @@ function ecsuSort(a: EcsuRow, b: EcsuRow): number {
   return a.ecsu_code.localeCompare(b.ecsu_code);
 }
 
-/** 取單 ECSU 單期間 kWh（sum energy_delta）；失敗回 null */
+/** 正向累積電能 param 判斷（對齊 backend map_circuit_to_energy_param 語意）：
+ *  cpm12d/cpm23 → 'energy_kwh_imp'；aem_drb → '*_ae_imp'（ma_ae_imp / ba1_ae_imp / ba1_3_ae_imp）。
+ *  ⚠️ 勿 sum 全部 energy_delta：backend 對所有 param 都回 last-first
+ *  （power_total 等瞬時量的日差無意義且可負——老王 2026-06-10 截圖揭露 -133,398 即此 bug）。 */
+function isEnergyImpParam(code: string | null | undefined): boolean {
+  if (!code) return false;
+  return code === 'energy_kwh_imp' || code.endsWith('_ae_imp');
+}
+
+/** 取單 ECSU 單期間 kWh（僅 sum 正向累積電能 param 的 energy_delta）；失敗回 null */
 async function fetchPeriodKwh(ecsuId: number, range: RangeVal): Promise<number | null> {
   try {
     const params = new URLSearchParams();
@@ -64,14 +73,15 @@ async function fetchPeriodKwh(ecsuId: number, range: RangeVal): Promise<number |
     params.append('from_ts', range[0].startOf('day').toISOString());
     params.append('to_ts', range[1].endOf('day').toISOString());
     const { data } = await api.get(`/reports/energy?${params.toString()}`);
-    const points: Array<{ energy_delta: number | null }> = data?.points ?? [];
+    const points: Array<{ parameter_code?: string; energy_delta: number | null }> = data?.points ?? [];
     let sum = 0;
     let has = false;
     for (const p of points) {
-      if (p.energy_delta != null) {
-        sum += p.energy_delta;
-        has = true;
-      }
+      if (!isEnergyImpParam(p.parameter_code)) continue;
+      if (p.energy_delta == null) continue;
+      if (p.energy_delta < 0) continue; // 計數器重置/換表防衛：單日負 delta 跳過
+      sum += p.energy_delta;
+      has = true;
     }
     return has ? sum : null;
   } catch {
