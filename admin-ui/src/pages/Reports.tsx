@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert, Button, Card, Col, DatePicker, Empty, Row, Select, Space, Spin,
-  Statistic, Table, Tabs, Tag, Typography, message,
+  Statistic, Tabs, Tag, Typography,
 } from 'antd';
 import { ReloadOutlined, DownloadOutlined } from '@ant-design/icons';
-import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
 import {
   CartesianGrid, Legend, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+  ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import api from '../services/api';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
@@ -25,6 +24,7 @@ import {
   type AlertHistoryEvent,
 } from '../hooks/useAlerts';
 import AlertsHistory from './AlertsHistory';
+import RangeCompare from '../components/RangeCompare';
 import { FF_REPORTS_LINECHART_ENABLED } from '../lib/featureFlags';
 import HistoryTable, {
   type Granularity,
@@ -95,25 +95,19 @@ interface ThermalPoint {
   value?: number | null;
 }
 
-const eventColumns: ColumnsType<EventRow> = [
-  // M-PM-201 §1.1: width 200 → 160（事件 Tab 顯 YYYY-MM-DD HH:mm:ss 留少量空白即可）
-  { title: '時間', dataIndex: 'ts', key: 'ts', width: 160, render: (v) => (v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '-') },
-  {
-    title: '嚴重度',
-    dataIndex: 'severity',
-    key: 'severity',
-    width: 100,
-    render: (v: string) => {
-      const color =
-        v === 'critical' ? 'red' : v === 'warn' ? 'orange' : v === 'info' ? 'blue' : 'default';
-      return v ? <Tag color={color}>{v}</Tag> : null;
-    },
-  },
-  { title: '類別', dataIndex: 'event_kind', key: 'event_kind', width: 140 },
-  { title: 'Edge', dataIndex: 'edge_id', key: 'edge_id', width: 160 },
-  { title: '設備', dataIndex: 'device_id', key: 'device_id', width: 180 },
-  { title: '訊息', dataIndex: 'message', key: 'message', ellipsis: true },
-];
+// M-PM-318S1 觀察點1（老王 2026-06-10 明示）：事件 Events 子分頁已挪到事件履歷頁（/events）→ 移除
+// （eventColumns / fetchEvents / events state / Tabs item 一併清除；EventRow 仍供 energy 事件徽章用）
+
+// M-PM-318S1 觀察點3（老王 2026-06-10）：thermal_alarm 三級閾值（對齊 M-P12-104 ems_alarm_rule seed：
+// info 60 / warn 75 / critical 90°C）；若 alarm rule 調值需同步此常數
+const THERMAL_LV = { info: 60, warn: 75, critical: 90 };
+function thermalTempColor(v: number | null | undefined): string | undefined {
+  if (v == null) return undefined;
+  if (v >= THERMAL_LV.critical) return '#cf1322';
+  if (v >= THERMAL_LV.warn) return '#fa8c16';
+  if (v >= THERMAL_LV.info) return '#8c8c8c';
+  return '#3f8600';
+}
 
 function pickEnergyGranularity(range: [Dayjs, Dayjs]): '15min' | 'daily' | 'monthly' {
   const days = range[1].diff(range[0], 'day', true);
@@ -159,8 +153,6 @@ export default function Reports() {
   const [, setDevicesLoading] = useState(false);
 
   // Events Tab
-  const [events, setEvents] = useState<EventRow[]>([]);
-  const [eventsLoading, setEventsLoading] = useState(false);
 
   // Energy Tab
   // M-PM-253 §二 動作 1（老王 5/21 拍板「棄用實體迴路下拉」改 ECSU 下拉）
@@ -696,26 +688,6 @@ export default function Reports() {
     [],
   );
 
-  // ========== Events ==========
-  const fetchEvents = async () => {
-    setEventsLoading(true);
-    try {
-      const res = await api.get('/reports/events', {
-        params: {
-          from_ts: range[0].toISOString(),
-          to_ts: range[1].toISOString(),
-          limit: 500,
-        },
-      });
-      const items = Array.isArray(res.data) ? res.data : res.data?.items ?? [];
-      setEvents(items);
-    } catch (e: any) {
-      message.error(`載入失敗：${e.message}`);
-      setEvents([]);
-    } finally {
-      setEventsLoading(false);
-    }
-  };
 
   // ========== Energy ==========
   const fetchEnergy = async () => {
@@ -784,12 +756,6 @@ export default function Reports() {
       setThermalLoading(false);
     }
   };
-
-  // 首次載入 events（對齊原行為）
-  useEffect(() => {
-    fetchEvents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ==== Energy chart/summary 預處理 ====
   const energyChartData = useMemo(
@@ -1268,29 +1234,6 @@ export default function Reports() {
             ),
           },
           {
-            key: 'events',
-            label: '事件 Events',
-            children: (
-              <>
-                <Space style={{ marginBottom: 16 }}>
-                  {renderRange()}
-                  <Button type="primary" icon={<ReloadOutlined />} onClick={fetchEvents}>
-                    查詢
-                  </Button>
-                </Space>
-                <Table<EventRow>
-                  columns={eventColumns}
-                  dataSource={events}
-                  rowKey={(r) => String(r.event_id ?? `${r.ts}-${r.edge_id}-${r.device_id}`)}
-                  loading={eventsLoading}
-                  size="small"
-                  pagination={{ pageSize: 20 }}
-                  scroll={{ y: 'calc(100vh - 320px)' }}
-                />
-              </>
-            ),
-          },
-          {
             key: 'thermal',
             label: '熱像 Thermal',
             children: (
@@ -1305,7 +1248,8 @@ export default function Reports() {
                       <span>
                         ⚠️ Edge 主機{' '}
                         <Tag color="red">
-                          {edgeDownAlerts.map((a) => a.edge_id).filter(Boolean).join(' / ') || '未知'}
+                          {/* M-PM-318S1 觀察點4：Edge ID 去重顯示（同 edge 多筆 alert 不重複列）*/}
+                          {[...new Set(edgeDownAlerts.map((a) => a.edge_id).filter(Boolean))].join(' / ') || '未知'}
                         </Tag>{' '}
                         失聯中（最早自{' '}
                         {dayjs(
@@ -1366,7 +1310,8 @@ export default function Reports() {
                         value={thermalSummary.max ?? '—'}
                         precision={thermalSummary.max != null ? 1 : undefined}
                         suffix={thermalSummary.max != null ? '°C' : undefined}
-                        valueStyle={{ color: '#d32f2f' }}
+                        // M-PM-318S1 觀察點3：依 thermal_alarm 三級閾值上色（60/75/90）
+                        valueStyle={{ color: thermalTempColor(thermalSummary.max) ?? '#d32f2f' }}
                       />
                     </Card>
                   </Col>
@@ -1394,6 +1339,9 @@ export default function Reports() {
                           {thermalQueriedRange[0].format('YYYY-MM-DD')} ~{' '}
                           {thermalQueriedRange[1].format('YYYY-MM-DD')}
                           {' · '}
+                          {/* M-PM-318S1 觀察點5：天數 inclusive（同日=1 天）+ 區分「範圍」與「有資料」 */}
+                          {thermalQueriedRange[1].diff(thermalQueriedRange[0], 'day') + 1} 天範圍
+                          {' · 資料 '}
                           {thermalChartData.length} 天
                         </div>
                       )}
@@ -1434,6 +1382,10 @@ export default function Reports() {
                             ]}
                           />
                           <Legend />
+                          {/* M-PM-318S1 觀察點3：thermal_alarm 三級閾值參考線（M-P12-104 seed 60/75/90）*/}
+                          <ReferenceLine y={THERMAL_LV.info} stroke="#8c8c8c" strokeDasharray="4 4" label={{ value: `留意 ${THERMAL_LV.info}°C`, fontSize: 11, fill: '#8c8c8c' }} />
+                          <ReferenceLine y={THERMAL_LV.warn} stroke="#fa8c16" strokeDasharray="4 4" label={{ value: `警告 ${THERMAL_LV.warn}°C`, fontSize: 11, fill: '#fa8c16' }} />
+                          <ReferenceLine y={THERMAL_LV.critical} stroke="#cf1322" strokeDasharray="4 4" label={{ value: `嚴重 ${THERMAL_LV.critical}°C`, fontSize: 11, fill: '#cf1322' }} />
                           <Line type="monotone" dataKey="avg" name="平均" stroke="#4caf50" strokeWidth={2} dot />
                           <Line type="monotone" dataKey="max" name="最高" stroke="#d32f2f" strokeWidth={1} dot />
                           <Line type="monotone" dataKey="min" name="最低" stroke="#1976d2" strokeWidth={1} dot />
@@ -1487,6 +1439,12 @@ export default function Reports() {
             key: 'alerts',
             label: 'IR 異常履歷',
             children: <AlertsHistory />,
+          },
+          {
+            // M-PM-318（老王 2026-06-10）：區間用電比較（年度節能簡報用）
+            key: 'range-compare',
+            label: '區間用電比較',
+            children: <RangeCompare />,
           },
         ]}
       />

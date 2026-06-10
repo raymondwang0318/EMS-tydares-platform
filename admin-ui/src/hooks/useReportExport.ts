@@ -80,5 +80,31 @@ export function useReportExport() {
     }
   }, []);
 
-  return { exportToExcel, isExporting };
+  // M-PM-318（老王 2026-06-10）：CSV 匯出 — 同 SheetJS bookType 切換，零新依賴
+  const exportToCsv = useCallback(<TRow,>(opts: ExportOptions<TRow>) => {
+    setIsExporting(true);
+    try {
+      const { rows, columns, filename, sheetName = 'Sheet1' } = opts;
+      const data = rows.map((row) => {
+        const obj: Record<string, string | number | null | undefined> = {};
+        for (const col of columns) {
+          obj[col.header] = col.render
+            ? col.render(row)
+            : (row[col.key as keyof TRow] as unknown as string | number | null | undefined);
+        }
+        return obj;
+      });
+      const ws = XLSX.utils.json_to_sheet(data, { header: columns.map((c) => c.header) });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      XLSX.writeFile(wb, filename, { bookType: 'csv' });
+    } catch (err) {
+      console.error('[useReportExport] csv failed', err);
+      throw err;
+    } finally {
+      setIsExporting(false);
+    }
+  }, []);
+
+  return { exportToExcel, exportToCsv, isExporting };
 }
