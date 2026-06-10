@@ -301,9 +301,22 @@ export function computeDeviceHealth(
   };
 }
 
-/** 是否有 scope='edge' 且 critical active（Reports Thermal Tab Edge-down banner 顯示判斷）*/
+/** 是否有 scope='edge' 且 critical active（Reports Thermal Tab Edge-down banner 顯示判斷）
+ *
+ * M-PM-318S1 觀察點4 補強（老王 2026-06-10 截圖揭露）：ems_alert_active 存在大量
+ * stale alert（evaluator 缺恢復自動 resolve，最舊 5/8 觸發仍掛 active → 已升報 P12A
+ * M-P11-E67 治本）。顯示層防衛：「失聯中」僅列 last_seen_at 在近 FRESH_MS 內仍被
+ * evaluator 更新的 alert——stale 殘留不再誤標全 fleet 失聯。
+ */
+const EDGE_DOWN_FRESH_MS = 10 * 60 * 1000; // 10 min
 export function findEdgeDownAlerts(activeAlerts: AlertActive[]): AlertActive[] {
+  const cutoff = Date.now() - EDGE_DOWN_FRESH_MS;
   return activeAlerts.filter(
-    (a) => a.scope === 'edge' && a.severity === 'critical' && a.status === 'active',
+    (a) =>
+      a.scope === 'edge' &&
+      a.severity === 'critical' &&
+      a.status === 'active' &&
+      !!a.last_seen_at &&
+      new Date(a.last_seen_at).getTime() >= cutoff,
   );
 }
