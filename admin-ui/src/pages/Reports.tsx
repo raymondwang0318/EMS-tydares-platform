@@ -206,7 +206,18 @@ export default function Reports() {
   const activeAlerts: AlertActive[] = activeAlertsData ?? [];
 
   // Phase γ-4 Edge-down banner 判斷（ADR-028 DR-028-05；M-PM-085 §3）
-  const edgeDownAlerts = useMemo(() => findEdgeDownAlerts(activeAlerts), [activeAlerts]);
+  // M-PM-318S1 觀察點2/4 補強（老王 2026-06-10）：排除 revoked edge（如已拆機 E66 status=revoked，
+  // 但 evaluator 不看 edge status 持續產 alert——backend 治本已升報 P12A M-P11-E67；
+  // 顯示層以 ems_edge.status 為準：revoked edge 不報失聯）
+  const { data: edgesForStatus } = useEdges();
+  const edgeDownAlerts = useMemo(() => {
+    const revoked = new Set(
+      (edgesForStatus ?? []).filter((e) => e.status === 'revoked').map((e) => e.edge_id),
+    );
+    return findEdgeDownAlerts(activeAlerts).filter(
+      (a) => !a.edge_id || !revoked.has(a.edge_id),
+    );
+  }, [activeAlerts, edgesForStatus]);
   // phase A 暴力假設：所有 811c_* 都歸同一 Edge（M-P12-023 §6.2 / ADR-028 DR-028-05）
   // 取 down edge 的 edge_id（若多個 Edge down 取第一個；多 Edge 模板化為未來工作）
   const suppressedEdgeId = edgeDownAlerts[0]?.edge_id ?? null;
