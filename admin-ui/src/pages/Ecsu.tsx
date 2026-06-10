@@ -443,6 +443,8 @@ export default function Ecsu() {
         size="small"
         pagination={false}
         expandable={{ defaultExpandAllRows: true }}
+        // 表頭固定（老王 2026-06-10）：表體在視窗高度內捲動，欄名 bar 固定最上方
+        scroll={{ y: 'calc(100vh - 300px)' }}
       />
 
       <Modal
