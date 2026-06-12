@@ -255,7 +255,8 @@ export default function Trends() {
         )}
       </Card>
 
-      <Card title="需量趨勢（需量 P, W；ECSU 聚合）" size="small" style={{ marginTop: 8 }}>
+      {/* 老王 2026-06-12：「P」符號對業主有爭議拿掉；單位 W 依原廠手冊 Ma.P.DM（總有效功率需量）確認 */}
+      <Card title="需量趨勢（W；ECSU 聚合）" size="small" style={{ marginTop: 8 }}>
         {energyLoading ? (
           <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
         ) : demandChartData.length === 0 ? (
@@ -268,7 +269,7 @@ export default function Trends() {
               <YAxis />
               <Tooltip />
               <Legend />
-              <Line type="monotone" dataKey="demand" name="需量 P (W)" stroke="#fa8c16" dot={false} strokeWidth={2} />
+              <Line type="monotone" dataKey="demand" name="需量 (W)" stroke="#fa8c16" dot={false} strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
         )}
