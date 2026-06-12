@@ -23,6 +23,7 @@ import {
 import { type Granularity } from '../components/HistoryTable';
 import { useEnergyReport } from '../hooks/useEnergyReport';
 import { useEcsuList, buildEcsuTree } from '../hooks/useEcsu';
+import { isEmbedded } from '../lib/embed';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -213,24 +214,27 @@ export default function Trends() {
         </Button>
       </Space>
 
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="趨勢圖以 ECSU 用電計費單位聚合顯示"
-        description={
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            M-PM-253 §二（老王 5/21 拍板）：選 ECSU → backend 自動聚合該 ECSU 綁定的所有迴路（含 sign 反向潮流計算）。
-            {selectedEcsu && (
-              <>
-                <br />
-                目前選擇：<Text code>{selectedEcsu.ecsu_code}</Text> · 區域 <Text code>{selectedEcsu.region ?? '—'}</Text> ·{' '}
-                <Text>{selectedEcsu.ecsu_name}</Text>
-              </>
-            )}
-          </Text>
-        }
-      />
+      {/* 前台 iframe 嵌入時隱藏後台工程提示（老王 2026-06-12）；後台直接訪問保留 */}
+      {!isEmbedded && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="趨勢圖以 ECSU 用電計費單位聚合顯示"
+          description={
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              M-PM-253 §二（老王 5/21 拍板）：選 ECSU → backend 自動聚合該 ECSU 綁定的所有迴路（含 sign 反向潮流計算）。
+              {selectedEcsu && (
+                <>
+                  <br />
+                  目前選擇：<Text code>{selectedEcsu.ecsu_code}</Text> · 區域 <Text code>{selectedEcsu.region ?? '—'}</Text> ·{' '}
+                  <Text>{selectedEcsu.ecsu_name}</Text>
+                </>
+              )}
+            </Text>
+          }
+        />
+      )}
 
       <Card title="用電趨勢（總功率 W；ECSU 聚合）" size="small" style={{ marginBottom: 16 }}>
         {energyLoading ? (
