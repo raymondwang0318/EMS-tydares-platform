@@ -46,6 +46,7 @@ import {
   type AlertEventType,
 } from '../hooks/useAlerts';
 import { useIrDevices } from '../hooks/useIrDevices';
+import { isEmbedded } from '../lib/embed';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -424,13 +425,16 @@ export default function AlertsHistory() {
 
   return (
     <>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="即時 active 異常每 30 秒自動更新；履歷依 filter 條件查詢（最大 limit=1000）"
-        description="點「詳情」查看完整事件資料 + 現場 LED 排障 hint（適用 811C IR 設備）"
-      />
+      {/* 前台嵌入時隱藏工程參數說明（老王 2026-06-12 比照趨勢圖）*/}
+      {!isEmbedded && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="即時 active 異常每 30 秒自動更新；履歷依 filter 條件查詢（最大 limit=1000）"
+          description="點「詳情」查看完整事件資料 + 現場 LED 排障 hint（適用 811C IR 設備）"
+        />
+      )}
       {renderFilters()}
       <Tabs
         defaultActiveKey="active"

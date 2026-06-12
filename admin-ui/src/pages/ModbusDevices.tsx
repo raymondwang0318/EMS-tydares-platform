@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Alert, Select, Space, Tag, Typography } from 'antd';
 import CrudTable from '../components/CrudTable';
+import { isEmbedded } from '../lib/embed';
 import { useEdges } from '../hooks/useEdges';
 import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
 
@@ -115,6 +116,7 @@ export default function ModbusDevices() {
       filterFn={filterFn}
       scrollY="calc(100vh - 420px)"
       hintText={
+        isEmbedded ? undefined :
         <Alert
           type="info"
           showIcon

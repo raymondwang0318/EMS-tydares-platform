@@ -24,6 +24,8 @@ import {
   isIrUnnamed,
   type IrDevice,
 } from '../hooks/useIrDevices';
+import { isEmbedded } from '../lib/embed';
+import ThermalThresholdCard from '../components/ThermalThresholdCard';
 
 const { Title, Text } = Typography;
 
@@ -272,13 +274,18 @@ export default function IrDevices() {
       <Title level={3} style={{ marginTop: 0 }}>
         IR 標籤管理
       </Title>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="811C 熱像 IR 設備清單（從 trx_reading 派生 — 不註冊主設備表）"
-        description="設定編號 / 安裝區域 / 安裝位置即納入健康監控；未命名設備不觸發離線告警。IP 地址待後端版本擴充。"
-      />
+      {/* 前台嵌入時隱藏工程說明（老王 2026-06-12 比照趨勢圖）*/}
+      {!isEmbedded && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="811C 熱像 IR 設備清單（從 trx_reading 派生 — 不註冊主設備表）"
+          description="設定編號 / 安裝區域 / 安裝位置即納入健康監控；未命名設備不觸發離線告警。IP 地址待後端版本擴充。"
+        />
+      )}
+      {/* M-PM-313 P1：熱像溫度三級閾值（全 811C 統一）— 藍色提示與設備列表之間 */}
+      <ThermalThresholdCard />
       {error && (
         <Alert
           type="error"

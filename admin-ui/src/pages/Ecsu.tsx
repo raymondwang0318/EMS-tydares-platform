@@ -37,6 +37,7 @@ import {
   type EcsuFormBody,
 } from '../hooks/useEcsu';
 import { useReportExport, type ExportColumn } from '../hooks/useReportExport';
+import { isEmbedded } from '../lib/embed';
 
 const { Title, Text } = Typography;
 
@@ -430,9 +431,11 @@ export default function Ecsu() {
         >
           匯出 Excel
         </Button>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          M-PM-219 §二補強：含綁定迴路數 / 即時 kW（30s 自動更新）/ 本月累積 kWh
-        </Text>
+        {!isEmbedded && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            M-PM-219 §二補強：含綁定迴路數 / 即時 kW（30s 自動更新）/ 本月累積 kWh
+          </Text>
+        )}
       </Space>
 
       <Table<EcsuRow & { children?: EcsuRow[] }>

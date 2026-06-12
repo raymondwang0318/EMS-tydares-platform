@@ -10,6 +10,7 @@ import {
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import api from '../services/api';
+import { isEmbedded } from '../lib/embed';
 import { useIrDevices, irDisplayLabel, type IrDevice } from '../hooks/useIrDevices';
 import { useReportExport } from '../hooks/useReportExport';
 // M-PM-186 §三 UI 軌：Energy Tab 加 Edge filter（fleet 5 顆 × ~10 設備需要）；
@@ -1185,7 +1186,7 @@ export default function Reports() {
                 {/* M-PM-202: Demand chart 已抽出獨立至 /trends 頁（趨勢圖）；本頁聚焦列表查詢 */}
                 {/* T-Reports-001 §AC 2.3：HistoryTable 6 column 老王指定順序 */}
                 {/* AEM「依設備」視角：默認顯示主 A 排（ma_*）6 metric；註腳提示 ma/mb 兩排 */}
-                {energyDeviceIsAem && effectiveViewMode === 'device' && (
+                {!isEmbedded && energyDeviceIsAem && effectiveViewMode === 'device' && (
                   <Alert
                     type="info"
                     showIcon
@@ -1232,7 +1233,7 @@ export default function Reports() {
                 />
                 {/* 5min/1hr 路徑首尾值 null 提示（M-P12-025 §7.2）*/}
                 {(energyGranularity === '5min' || energyGranularity === '1hr') &&
-                  energyHistoryRows.length > 0 && (
+                  !isEmbedded && energyHistoryRows.length > 0 && (
                     <Alert
                       type="info"
                       showIcon
@@ -1296,12 +1297,14 @@ export default function Reports() {
                     查詢
                   </Button>
                 </Space>
-                <Alert
-                  type="info"
-                  showIcon
-                  message="熱像趨勢為 daily 聚合；建議選 1 週以上範圍以看出趨勢"
-                  style={{ marginBottom: 16 }}
-                />
+                {!isEmbedded && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="熱像趨勢為 daily 聚合；建議選 1 週以上範圍以看出趨勢"
+                    style={{ marginBottom: 16 }}
+                  />
+                )}
                 {thermalError && (
                   <Alert
                     type="error"
