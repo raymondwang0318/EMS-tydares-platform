@@ -43,6 +43,9 @@ function formatTime(iso: string | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// 最近上線離線門檻（老王 2026-06-15）：超過 12 小時未上線 → 紅字警示
+const OFFLINE_RED_MS = 12 * 60 * 60 * 1000;
+
 export default function Edges() {
   const { data: edges, isLoading, isFetching, refetch, error } = useEdges();
   const { message, modal } = App.useApp();
@@ -361,7 +364,19 @@ export default function Edges() {
       dataIndex: 'last_seen_at',
       key: 'last_seen_at',
       width: 160,
-      render: (iso: string | null) => formatTime(iso),
+      // 老王 2026-06-15：離線超過 12H → 紅字（斷電復電巡查一眼看出未恢復 edge）
+      render: (iso: string | null) => {
+        const txt = formatTime(iso);
+        if (!iso) return <Text type="secondary">{txt}</Text>;
+        const ageMs = Date.now() - new Date(iso).getTime();
+        if (ageMs <= OFFLINE_RED_MS) return <Text>{txt}</Text>;
+        const hrs = Math.floor(ageMs / 3_600_000);
+        return (
+          <Tooltip title={`已離線約 ${hrs} 小時（超過 12 小時門檻）`}>
+            <Text style={{ color: '#cf1322', fontWeight: 500 }}>{txt}</Text>
+          </Tooltip>
+        );
+      },
       sorter: (a, b) => (a.last_seen_at ?? '').localeCompare(b.last_seen_at ?? ''),
     },
     {
