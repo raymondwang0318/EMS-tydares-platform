@@ -1,10 +1,14 @@
 <!doctype html>
-<html lang="en">
+<!-- M-PM-320 主軸1 根治：lang=en 讓 Chrome 對中文使用者自動翻譯 → Google 翻譯注入 DOM（goog-gt-tt）
+     竄改 React 管理的節點 → fetch 回來更新卡片時 removeChild/insertBefore throw（總覽 4 卡卡在 0）。
+     宣告 zh-Hant（內容語言）+ translate=no + meta notranslate 雙保險，從源頭關閉自動翻譯。 -->
+<html lang="zh-Hant" translate="no">
   <head>
     <meta charset="UTF-8" />
+    <meta name="google" content="notranslate" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>admin-ui</title>
+    <title>Tydares EMS — 工程維護</title>
   </head>
   <body>
     <div id="root"></div>

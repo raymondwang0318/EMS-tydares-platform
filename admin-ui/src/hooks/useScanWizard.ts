@@ -304,8 +304,8 @@ export function useRenameDevice() {
       edgeId: string;
     }) => {
       const { data } = await api.patch(
-        `/admin/devices/${encodeURIComponent(deviceId)}/name`,
-        { device_name: deviceName },
+        `/admin/devices/${encodeURIComponent(deviceId)}`,
+        { display_name: deviceName },
       );
       return data;
     },

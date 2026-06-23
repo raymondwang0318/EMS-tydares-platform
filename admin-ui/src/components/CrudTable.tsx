@@ -3,6 +3,7 @@ import { Table, Button, Space, Modal, Form, Input, InputNumber, message, Popconf
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../services/api';
+import { useAuth } from '../lib/authContext';
 
 interface CrudTableProps {
   title: string;
@@ -68,6 +69,12 @@ export default function CrudTable({
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
   const [form] = Form.useForm();
+  // viewer 唯讀防呆（M-P12-120 件1）：非 admin 一律隱藏寫操作（後端已 enforce 403，此為純 UX）
+  const { user: me } = useAuth();
+  const isViewer = me?.role !== 'admin';
+  const noAdd = hideAdd || isViewer;
+  const noEdit = hideEdit || isViewer;
+  const noDelete = hideDelete || isViewer;
 
   const fetchData = async () => {
     setLoading(true);
@@ -129,10 +136,10 @@ export default function CrudTable({
     width: 150,
     render: (_: any, record: any) => (
       <Space>
-        {!hideEdit && (
+        {!noEdit && (
           <Button icon={<EditOutlined />} size="small" onClick={() => handleEdit(record)} />
         )}
-        {!hideDelete && (
+        {!noDelete && (
           <Popconfirm title="確定刪除？" onConfirm={() => handleDelete(record[rowKey])}>
             <Button icon={<DeleteOutlined />} size="small" danger />
           </Popconfirm>
@@ -142,7 +149,7 @@ export default function CrudTable({
   };
 
   // 若所有操作都被隱藏 → 不顯示操作欄
-  const showActionColumn = !hideEdit || !hideDelete;
+  const showActionColumn = !noEdit || !noDelete;
 
   // M-PM-176 / T-AdminUI-004：純 frontend filter（filterFn 由 caller 注入）
   const displayData = useMemo(
@@ -154,7 +161,7 @@ export default function CrudTable({
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>{title}</h2>
-        {!hideAdd && (
+        {!noAdd && (
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>新增</Button>
         )}
       </div>

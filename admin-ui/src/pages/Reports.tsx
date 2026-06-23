@@ -902,14 +902,24 @@ export default function Reports() {
   ]);
 
   // ==== Thermal chart/summary 預處理 ====
+  // M-PM-320 修（老王 6/11 截圖：KPI 卡空白 + 「0 天」vs 履歷列表 2 筆矛盾）：
+  //   根因＝本檔 fetch 走 mode=history（L752），後端回 ts + max_value/min_value/avg_value，
+  //   但本 chart/summary 原讀 bucket_day + daily_*（那是 mode=trend/cagg 欄位）→ 全 null →
+  //   key 為空被 filter 掉 → chartData 空 → 「{length} 天」=0、折線圖空、summary 全 null。
+  //   履歷列表 thermalHistoryRows 早已用 `p.ts ?? p.bucket_day` + `p.max_value ?? p.daily_max`
+  //   fallback（L957/969）所以有值 → 故矛盾。此處對齊同一 fallback pattern 即同時解三症狀。
   const thermalChartData = useMemo(() => {
     const byDay = new Map<string, { ts: string; avg?: number; max?: number; min?: number }>();
     thermalPoints.forEach((p) => {
-      const key = p.bucket_day ?? '';
+      const key = p.ts ?? p.bucket_day ?? '';
+      if (!key) return;
       const e = byDay.get(key) ?? { ts: key };
-      if (p.parameter_code === 'avg_temp' && p.daily_avg != null) e.avg = p.daily_avg;
-      if (p.parameter_code === 'max_temp' && p.daily_max != null) e.max = p.daily_max;
-      if (p.parameter_code === 'min_temp' && p.daily_min != null) e.min = p.daily_min;
+      const v_avg = p.avg_value ?? p.daily_avg;
+      const v_max = p.max_value ?? p.daily_max;
+      const v_min = p.min_value ?? p.daily_min;
+      if (p.parameter_code === 'avg_temp' && v_avg != null) e.avg = v_avg;
+      if (p.parameter_code === 'max_temp' && v_max != null) e.max = v_max;
+      if (p.parameter_code === 'min_temp' && v_min != null) e.min = v_min;
       byDay.set(key, e);
     });
     return Array.from(byDay.values())
@@ -1038,18 +1048,20 @@ export default function Reports() {
     [],
   );
 
+  // M-PM-320 修：同 thermalChartData，KPI 卡（最熱/最低/平均）改讀 mode=history 的 *_value
+  // （daily_* fallback 保留向下相容 mode=trend）→ 不再因讀錯欄位顯「─」
   const thermalSummary = useMemo(() => {
     const avgs = thermalPoints
       .filter((p) => p.parameter_code === 'avg_temp')
-      .map((p) => p.daily_avg)
+      .map((p) => p.avg_value ?? p.daily_avg)
       .filter((v): v is number => v != null);
     const maxes = thermalPoints
       .filter((p) => p.parameter_code === 'max_temp')
-      .map((p) => p.daily_max)
+      .map((p) => p.max_value ?? p.daily_max)
       .filter((v): v is number => v != null);
     const mins = thermalPoints
       .filter((p) => p.parameter_code === 'min_temp')
-      .map((p) => p.daily_min)
+      .map((p) => p.min_value ?? p.daily_min)
       .filter((v): v is number => v != null);
     return {
       max: maxes.length ? Math.max(...maxes) : null,

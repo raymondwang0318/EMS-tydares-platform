@@ -32,8 +32,14 @@ const { Title } = Typography;
 const TC_COUNT = 16;
 const COLS = 4;
 
-/** 超過此時間（ms）未收到 frame → 視為離線（按鈕轉藍） */
-const ONLINE_STALE_MS = 15_000;
+/**
+ * 超過此時間（ms）未收到 frame → 視為離線（按鈕轉藍）。
+ *
+ * 2026-06-05 採證：相機 frame 實測約每 10-14s 一張（接近舊 15s 門檻），
+ * 正常相機常因單張延遲就誤判離線轉藍 flicker。放寬至 25s（約 2 個 frame
+ * 週期緩衝），既消除誤報藍、又仍能在真離線（連 25s 無 frame）時轉藍。
+ */
+const ONLINE_STALE_MS = 25_000;
 
 /** sessionStorage 鍵前綴 — 持久化各設備最後一張 frame，跨 hard reload */
 const SS_PREFIX = 'thermal_frame_';

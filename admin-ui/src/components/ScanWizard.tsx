@@ -113,6 +113,9 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
   const [transport, setTransport] = useState<'tcp' | 'rs485'>('tcp');
   const [tcpHost, setTcpHost] = useState('192.168.10.181');
   const [tcpPort, setTcpPort] = useState(502);
+  // fleet 標準 = /dev/ttyS0（2026-06-10 E23 掃描失敗修正；ems_commands 掃描史採證：
+  // E06-E16/E23 全 ttyS0 SUCCEEDED、ttyAMA0 在 E17/E23 有 FAILED；舊註解「5/27 全 fleet
+  // ttyAMA0 遷移」與實況不符已過時。育成台如需 ttyAMA0 可於欄位手動改。）
   const [rs485Port, setRs485Port] = useState('/dev/ttyS0');
   const [rs485Baud, setRs485Baud] = useState(9600);
   const [scanPlan, setScanPlan] = useState<ScanPlanEntry[]>([
@@ -343,7 +346,9 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
     const rows: ConfirmRow[] = scanResults.map((dev) => ({
       ...dev,
       checked: dev.online,
-      device_name: `${dev.device_type}-${edgeId}-slave${dev.slave_id}`,
+      // 正規化 device_type：去 _do/_di 後綴，統一 device_id 格式
+      // tcs300b04_do → tcs300b04 / tcs300b03_di → tcs300b03
+      device_name: `${dev.device_type.replace(/_do$|_di$/, '')}-${edgeId}-slave${dev.slave_id}`,
     }));
     setConfirmRows(rows);
     setWizardStep('confirm');
@@ -359,7 +364,8 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
 
     try {
       const devices: ConfirmDevice[] = selected.map((r) => ({
-        device_id: `${r.device_type}-${edgeId}-slave${r.slave_id}`,
+        // 正規化：去 _do/_di 後綴，與 useDOControl/useFanStatus device_id 格式對齊
+        device_id: `${r.device_type.replace(/_do$|_di$/, '')}-${edgeId}-slave${r.slave_id}`,
         device_type: r.device_type,
         device_name: r.device_name,
         slave_id: r.slave_id,
@@ -375,7 +381,9 @@ export function ScanWizard({ edgeId, open, onClose }: ScanWizardProps) {
           ? `已建立 ${res.created_count} 台設備`
           : `設備已存在（${selected.length} 筆），未新增`;
       message.success(
-        `${label}，配置指令已下發 (${res.command_id.slice(0, 8)}...)`,
+        res.command_id
+          ? `${label}，配置指令已下發 (${res.command_id.slice(0, 8)}...)`
+          : label,
       );
       // T-AdminUI-005: confirm 成功 → 標記跳過 rollback
       //

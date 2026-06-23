@@ -5,6 +5,7 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import { App as AntdApp } from 'antd'
 import { queryClient } from './lib/queryClient'
 import { ThemeProvider } from './lib/theme'
+import { AuthProvider } from './lib/authContext'
 import App from './App.tsx'
 import './index.css'
 
@@ -13,7 +14,9 @@ createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <AntdApp>
-          <App />
+          <AuthProvider>
+            <App />
+          </AuthProvider>
         </AntdApp>
       </ThemeProvider>
       <ReactQueryDevtools initialIsOpen={false} />

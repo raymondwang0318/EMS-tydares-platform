@@ -25,6 +25,11 @@ import api from '../services/api';
 export const USE_MOCK_DATA: boolean =
   (import.meta.env.VITE_USE_MOCK_REMOTE_IO ?? 'false').toString().toLowerCase() !== 'false';
 
+// 軌C 對齊（M-PM-340 + 老王 2026-06-22「DI 沒上來就擋」）：DI ts 逾此秒數視同無即時資料
+// （歷史堆積 FIFO 卡 queue / 上報中斷），useFanStatus 回 null → FanCard 擋盲操作。
+// 90s = edge change-detection 心跳 60s 保底 + ingest/網路 buffer；對齊 Pananora fan_control MAX_DI_AGE_SEC。
+const MAX_DI_AGE_SEC = 90;
+
 // ─────────────────────────────────────────────────────────────
 // Backend API 回傳型別
 // ─────────────────────────────────────────────────────────────
@@ -85,8 +90,8 @@ function deviceIdToAlarmInfo(
   device_id: string,
   channel: number,
 ): { edge_id: string; site_code: string; fan_type: FanType; fan_index: number; fan_name: string } | null {
-  // 格式：tcs300b03_di-TYDARES-E17-slave1（ScanWizard confirm 格式）
-  const m = device_id.match(/^tcs300b03_di-(.+?)-slave(\d+)$/i);
+  // 格式：tcs300b03-TYDARES-E17-slave1（ScanWizard 正規化格式，無 _di 後綴）
+  const m = device_id.match(/^tcs300b03-(.+?)-slave(\d+)$/i);
   if (!m) return null;
   const edge_id = m[1]; // TYDARES-E17
   const slave_di = parseInt(m[2], 10); // 1, 2, 3
@@ -166,24 +171,32 @@ export function useFanStatus(edge_id: string, fan_type: FanType, fan_index: numb
         return mockFanStatus(edge_id, fan_type, fan_index);
       }
       const mapping = getFanChannelMapping(fan_type, fan_index);
-      // device_id 對齊 ScanWizard confirm 格式：tcs300b03_di-{edge_id}-slave{N}
-      const deviceId = `tcs300b03_di-${edge_id}-slave${mapping.slave_di}`;
+      // device_id 格式：tcs300b03-{edge_id}-slave{N}（ScanWizard 正規化後無 _di 後綴）
+      const deviceId = `tcs300b03-${edge_id}-slave${mapping.slave_di}`;
       try {
         const r = await api.get<DeviceStatusResponse>(
           `/admin/io/devices/${encodeURIComponent(deviceId)}/status`,
         );
-        const { channels, data_source } = r.data;
+        const { channels, data_source, ts } = r.data;
         if (data_source === 'pending_ingest' || !channels) {
-          return null; // DI ingest pipeline 尚未補齊 → FanCard 顯示「DI 待 ingest」
+          return null; // DI ingest pipeline 尚未補齊 → FanCard 顯示「待 DI ingest」
         }
-        // 對映 di_channel_base → FanStatus（手動/自動/運轉/過載）
+        // 軌C：DI ts 逾 MAX_DI_AGE_SEC（歷史堆積 FIFO 卡 queue / 上報中斷）視同無即時 DI → null
+        // 防 P10C 清積壓時推歷史值被當即時，導致業主拿舊值盲操作風扇（老王 2026-06-22「DI 沒上來就擋」）。
+        if (ts) {
+          const ageSec = (Date.now() - new Date(ts).getTime()) / 1000;
+          if (ageSec > MAX_DI_AGE_SEC) return null;
+        }
+        // 對映 di_channel_base → FanStatus
+        // M-P10D 2026-06-03 老王 TCS300B03 接線圖修正：ch1=自動 / ch2=手動 / ch3=運轉 / ch4=過載
+        // （原 manual/auto 對調，admin-ui 手動/自動讀反；接線圖為 SSOT）
         const base = mapping.di_channel_base; // 1-based
         const getState = (ch: number) => channels.find((c) => c.channel === ch)?.state === 1;
         return {
-          manual: getState(base),
-          auto: getState(base + 1),
-          running: getState(base + 2),
-          overload: getState(base + 3),
+          auto: getState(base),         // ch1 = 自動
+          manual: getState(base + 1),   // ch2 = 手動
+          running: getState(base + 2),  // ch3 = 運轉
+          overload: getState(base + 3), // ch4 = 過載
           do_state: false, // DO state 需獨立查 DO device；Phase B 暫不實作（ingest 補齊後統一）
         };
       } catch (err: any) {
@@ -192,8 +205,51 @@ export function useFanStatus(edge_id: string, fan_type: FanType, fan_index: numb
         throw err; // 其他錯誤繼續往上拋
       }
     },
-    refetchInterval: 5000,
-    staleTime: 1000,
+    refetchInterval: 1000, // M-P10D 2026-05-28: 5000→1000 即時 DI/DO 狀態顯示
+    staleTime: 500,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// useDODeviceStatus — 整個 DO 模組（tcs300b04 slave4）即時 16ch 狀態
+//
+// 老王 2026-06-05：運轉判定改為「偵測 DO 輸出」（指令真的下達），DI 運轉為輔助驗證。
+// queryKey 只認 edge_id → 同區所有風扇共用一次抓取（dedupe；1 DO call / edge / 秒）。
+//
+// 回傳：
+//   Record<do_channel, boolean>  → 真實 DO 狀態（do_channel 1-9 → ON/OFF）
+//   null                          → 待 ingest / device 未建（404）
+//   undefined                     → 載入中 / 錯誤
+// ─────────────────────────────────────────────────────────────
+
+export function useDODeviceStatus(edge_id: string) {
+  return useQuery({
+    queryKey: ['remote-io', 'do-status', edge_id],
+    queryFn: async (): Promise<Record<number, boolean> | null> => {
+      if (USE_MOCK_DATA) {
+        // mock：負壓 1 ON（運轉中），其餘 OFF
+        return { 1: true };
+      }
+      // DO 模組各 edge 固定 tcs300b04-{edge}-slave4
+      const deviceId = `tcs300b04-${edge_id}-slave4`;
+      try {
+        const r = await api.get<DeviceStatusResponse>(
+          `/admin/io/devices/${encodeURIComponent(deviceId)}/status`,
+        );
+        const { channels, data_source } = r.data;
+        if (data_source === 'pending_ingest' || !channels) return null;
+        const map: Record<number, boolean> = {};
+        channels.forEach((c) => {
+          map[c.channel] = c.state === 1;
+        });
+        return map;
+      } catch (err: any) {
+        if (err?.response?.status === 404) return null; // device 未建 → DO 控制仍可用
+        throw err;
+      }
+    },
+    refetchInterval: 1000, // 即時 DO 狀態
+    staleTime: 500,
   });
 }
 
@@ -220,10 +276,9 @@ export function useDOControl() {
         return { status: 'mock_ok' };
       }
       const mapping = getFanChannelMapping(vars.fan_type, vars.fan_index);
-      // device_id 對齊 ScanWizard confirm 格式：tcs300b04_do-{edge_id}-slave4
-      // TCS300B04 (DO) 各 edge 固定 Modbus slave 4；ScanWizard 以此建立 device record
-      // backend Guard 3 檢查 device_kind='tcs300b04_do'；DB lookup 需與 ScanWizard 寫入格式一致
-      const doDeviceId = `tcs300b04_do-${vars.edge_id}-slave4`;
+      // device_id 格式：tcs300b04-{edge_id}-slave4（ScanWizard 正規化後無 _do 後綴）
+      // TCS300B04 (DO) 各 edge 固定 Modbus slave 4
+      const doDeviceId = `tcs300b04-${vars.edge_id}-slave4`;
       const edgeNum = vars.edge_id.match(/E(\d+)$/)?.[1] ?? '??';
       const relayId = `E${edgeNum}-DO1-ch${mapping.do_channel}`;
       const r = await api.post<{ command_id?: string; status?: string; command_type?: string }>(

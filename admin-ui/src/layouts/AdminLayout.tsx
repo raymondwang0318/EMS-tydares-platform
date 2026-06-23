@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, theme, ConfigProvider } from 'antd';
+import { Navigate, Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { Layout, Menu, theme, ConfigProvider, Button, Spin } from 'antd';
 import {
   DashboardOutlined,
   NodeIndexOutlined,
@@ -16,7 +16,11 @@ import {
   ApiOutlined,
   ControlOutlined,
   WarningOutlined,
+  UserOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons';
+// M-PM-309: 登入整站擋（未登入 → /login）
+import { useAuth } from '../lib/authContext';
 // M-PM-215 / T-AdminUI-002 方向 B：feature flag 控制設備型號 menu 顯示
 import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
 
@@ -47,6 +51,8 @@ const menuItems = [
   // M-PM-202：趨勢圖獨立分項；跟報表同級
   { key: '/trends', icon: <LineChartOutlined />, label: '趨勢圖' },
   { key: '/config', icon: <SettingOutlined />, label: '系統設定' },
+  // M-PM-309：用戶管理（MVP 框架；多用戶/RBAC 後續擴充）
+  { key: '/users', icon: <UserOutlined />, label: '用戶管理' },
 ];
 
 export default function AdminLayout() {
@@ -54,6 +60,22 @@ export default function AdminLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { token: { colorBgContainer, borderRadiusLG } } = theme.useToken();
+  const { user, via, loading, logout } = useAuth();
+
+  // M-PM-309 整站擋：session 還原中先轉圈，未登入導 /login
+  if (loading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Spin size="large" />
+      </div>
+    );
+  }
+  // 議題C(M-PM-341)：熱力圖 Open View — 訪客(Pananora iframe 嵌入 /thermal/all)可看熱力圖，不擋。
+  // 數據走 SSE 直連 Edge(CORS *) + edges/ir-devices read-only(P12A 開放)；只看不能控。
+  const isPublicThermal = location.pathname === '/thermal/all';
+  if (!user && !isPublicThermal) {
+    return <Navigate to="/login" replace />;
+  }
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -76,6 +98,21 @@ export default function AdminLayout() {
             onClick={({ key }) => navigate(key)}
           />
         </ConfigProvider>
+        {/* M-PM-309: 登入者 + 登出（collapse trigger 高 48，墊在其上方）；
+            bearer 嵌入模式（M-P12-108）無 session 可登出 → 不顯示 */}
+        {via !== 'bearer' && user && (
+          <div style={{ position: 'absolute', bottom: 48, width: '100%', textAlign: 'center', padding: '8px 0', color: '#000' }}>
+            <UserOutlined /> {!collapsed && <span style={{ margin: '0 4px' }}>{user.username}</span>}
+            <Button
+              type="link"
+              size="small"
+              icon={<LogoutOutlined />}
+              onClick={async () => { await logout(); navigate('/login'); }}
+            >
+              {!collapsed && '登出'}
+            </Button>
+          </div>
+        )}
       </Sider>
       <Layout>
         {/* M-PM-201 §1.3: Header bar 整塊移除（釋放垂直空間給內容區）*/}

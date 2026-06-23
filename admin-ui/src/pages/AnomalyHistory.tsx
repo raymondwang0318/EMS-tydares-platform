@@ -126,6 +126,19 @@ export default function AnomalyHistory() {
 
   const items = data?.items ?? [];
 
+  // 一鍵全解除（老王 2026-06-17）：把當前篩選列表中所有「未解除」事件批次標記解除
+  // 範圍＝目前 items（受上方時間/嚴重度/類型/Edge 篩選控制）；純前端迴圈呼叫既有單筆 resolve API（不需後端改）
+  const unresolvedCount = useMemo(() => items.filter((e) => !e.resolved_at).length, [items]);
+  const resolveAllMut = useMutation({
+    mutationFn: async () => {
+      const unresolved = items.filter((e) => !e.resolved_at);
+      await Promise.all(unresolved.map((e) => api.post(`/admin/events/${e.event_id}/resolve`, {})));
+      return unresolved.length;
+    },
+    onSuccess: (n) => { message.success(`已全部標記解除（${n} 筆）`); refetch(); },
+    onError: (e: any) => message.error(`全解除失敗：${e?.response?.data?.detail ?? e?.message ?? '未知錯誤'}`),
+  });
+
   // event_kind 下拉選項：從當前結果集 distinct + 永遠含已選值
   const kindOptions = useMemo(() => {
     const set = new Set<string>();
@@ -218,7 +231,21 @@ export default function AnomalyHistory() {
             系統運維 + 應用層事件（ems_events）；預設顯示錯誤，可調嚴重度；點設備可跳轉；展開列看原始資料
           </Text>
         </div>
-        <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>重新整理</Button>
+        <Space>
+          <Popconfirm
+            title={`將當前列表中 ${unresolvedCount} 筆未解除事件全部標記已解除？`}
+            description="僅影響目前篩選/顯示的事件"
+            okText="全部解除"
+            cancelText="取消"
+            disabled={unresolvedCount === 0}
+            onConfirm={() => resolveAllMut.mutate()}
+          >
+            <Button danger icon={<CheckCircleOutlined />} disabled={unresolvedCount === 0} loading={resolveAllMut.isPending}>
+              一鍵全解除{unresolvedCount > 0 ? `（${unresolvedCount}）` : ''}
+            </Button>
+          </Popconfirm>
+          <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>重新整理</Button>
+        </Space>
       </Space>
 
       {/* 篩選列 */}

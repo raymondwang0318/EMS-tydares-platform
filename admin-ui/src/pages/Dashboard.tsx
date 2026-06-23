@@ -11,6 +11,8 @@ import {
 } from '@ant-design/icons';
 import api from '../services/api';
 import { humanizeMessage, kindLabel, sevLabel } from '../utils/eventHumanize';
+// M-PM-320S1 主軸2（業主 6/15 拍板 (a) 採納隱藏）：設備型號卡片由 feature flag 控制；對齊 AdminLayout menu 同一 flag
+import { FF_DEVICE_MODELS_ENABLED } from '../lib/featureFlags';
 
 const { Title, Text } = Typography;
 
@@ -118,6 +120,9 @@ export default function Dashboard() {
     fetchStats();
   }, [fetchStats]);
 
+  // M-PM-320S1 主軸2：設備型號卡 feature flag 關 → 隱藏（4 卡變 3 卡），其餘卡放寬 md 撐滿版面
+  const cardMd = FF_DEVICE_MODELS_ENABLED ? 6 : 8;
+
   return (
     <Spin spinning={loading}>
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} align="start">
@@ -148,22 +153,25 @@ export default function Dashboard() {
         />
       )}
       <Row gutter={16}>
-        <Col xs={12} md={6}>
+        <Col xs={12} md={cardMd}>
           <Card>
             <Statistic title="Edge 節點" value={stats.edges} prefix={<NodeIndexOutlined />} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
+        <Col xs={12} md={cardMd}>
           <Card>
             <Statistic title="Modbus 設備" value={stats.devices} prefix={<ThunderboltOutlined />} />
           </Card>
         </Col>
-        <Col xs={12} md={6}>
-          <Card>
-            <Statistic title="設備型號" value={stats.deviceModels} prefix={<ClusterOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
+        {/* M-PM-320S1 主軸2：設備型號卡由 feature flag 控制（業主拍板 (a) 隱藏；endpoint/route/component 既建保留可逆）*/}
+        {FF_DEVICE_MODELS_ENABLED && (
+          <Col xs={12} md={cardMd}>
+            <Card>
+              <Statistic title="設備型號" value={stats.deviceModels} prefix={<ClusterOutlined />} />
+            </Card>
+          </Col>
+        )}
+        <Col xs={12} md={cardMd}>
           <Card hoverable onClick={() => navigate('/events')} style={{ cursor: 'pointer' }}>
             <Statistic title="24h 事件" value={stats.events24h} prefix={<BellOutlined />} />
           </Card>

@@ -15,7 +15,7 @@
  * - DO 控制：✅ 可用（命令入 ems_commands queue；Guard stub-pass）
  * - Alarm：✅ 可用
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   App,
@@ -32,6 +32,7 @@ import {
   Spin,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
@@ -43,12 +44,14 @@ import {
   ThunderboltOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { SITE_CONFIGS, deriveFanMode, type FanType, type SiteConfig } from '../constants/remoteIO';
+import { SITE_CONFIGS, deriveFanMode, getFanChannelMapping, type FanType, type SiteConfig } from '../constants/remoteIO';
+import { useAuth } from '../lib/authContext';
 import {
   USE_MOCK_DATA,
   useAckAlarm,
   useActiveAlarms,
   useDOControl,
+  useDODeviceStatus,
   useFanStatus,
   type ActiveAlarm,
   type AckAlarmBody,
@@ -69,12 +72,48 @@ interface FanCardProps {
 function FanCard({ site, fan_type, fan_index }: FanCardProps) {
   const { message, modal } = App.useApp();
   const { data: status, isLoading } = useFanStatus(site.edge_id, fan_type, fan_index);
+  const { data: doStatus } = useDODeviceStatus(site.edge_id);
   const doControl = useDOControl();
+  // 件1b（M-P12-120）：I/O 控制鈕 gate can_control_io（後端 control_do 已 enforce 403，此為防呆 UX）
+  const { user: me } = useAuth();
+  const canControlIo = !!me?.can_control_io;
 
+  const mapping = getFanChannelMapping(fan_type, fan_index);
   const fan_name = fan_type === 'fugu' ? `負壓風扇 ${fan_index}` : `內循環風扇 ${fan_index}`;
   const mode = status ? deriveFanMode(status) : null;
 
+  // 老王 2026-06-05 啟動狀態判斷：運轉與否看「DO 輸出」（指令真的下達），DI 運轉為輔助驗證。
+  // do_state = 該風扇 DO channel 即時狀態（tcs300b04 slave4）。
+  const do_state = doStatus ? (doStatus[mapping.do_channel] ?? false) : false;
+
+  // 異常 = DO 已輸出(ON) 持續 >20s 但 DI 運轉仍 OFF → 設備未真實啟動。
+  // 前端即時視覺（client 端 20s 計時）；後端 watcher 另生持久警報進 AlarmPanel。
+  const ANOMALY_GRACE_MS = 20_000;
+  const doOnSinceRef = useRef<number | null>(null);
+  const prevAnomalyRef = useRef(false);
+  useEffect(() => {
+    if (do_state && doOnSinceRef.current === null) doOnSinceRef.current = Date.now();
+    if (!do_state) doOnSinceRef.current = null;
+  }, [do_state]);
+  const startupAnomaly =
+    do_state &&
+    status != null &&
+    !status.running &&
+    doOnSinceRef.current != null &&
+    Date.now() - doOnSinceRef.current > ANOMALY_GRACE_MS;
+  useEffect(() => {
+    if (startupAnomaly && !prevAnomalyRef.current) {
+      message.warning(`${fan_name} 啟動異常：DO 已輸出但設備未運轉（DI 運轉未觸發）`, 6);
+    }
+    prevAnomalyRef.current = startupAnomaly;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startupAnomaly]);
+
   const handleDOControl = (new_state: boolean) => {
+    if (!canControlIo) {
+      message.warning('無 I/O 控制權，無法操作風扇（需現場操作員權限；若您應有權限請重新登入刷新）');
+      return;
+    }
     const action = new_state ? '啟動' : '停止';
     modal.confirm({
       title: `${action} ${fan_name}`,
@@ -114,7 +153,7 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
     });
   };
 
-  const cardBorderColor = useMemo(() => {
+  const modeBorderColor = useMemo(() => {
     if (!mode) return undefined;
     switch (mode) {
       case 'overload':
@@ -127,6 +166,8 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
         return '#d9d9d9';
     }
   }, [mode]);
+  // 啟動異常時卡片轉紅框（優先於 mode 色）
+  const cardBorderColor = startupAnomaly ? '#ff4d4f' : modeBorderColor;
 
   if (isLoading) {
     return (
@@ -156,17 +197,21 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
             <Tag color="default">過載 ○</Tag>
           </Space>
           <div style={{ marginTop: 8, marginBottom: 8 }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>⏳ 待 DI 狀態 ingest</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>⏳ 等待即時 DI 資料（無法操作）</Text>
           </div>
-          <Button
-            type="primary"
-            block
-            icon={<PlayCircleOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(true)}
-          >
-            啟動
-          </Button>
+          {/* 軌C（老王 2026-06-22「DI 沒上來就擋」）：無即時 DI 回授一律擋啟動，避免盲開風扇
+              （DO 輸出但拿不到 DI 確認運轉/過載）。DI ingest 上來後自動恢復可操作。 */}
+          <Tooltip title="DI 訊號未上報（等待即時資料）；無 DI 回授不可操作風扇">
+            <Button
+              type="primary"
+              block
+              icon={<PlayCircleOutlined />}
+              disabled
+              onClick={() => handleDOControl(true)}
+            >
+              啟動
+            </Button>
+          </Tooltip>
         </Space>
       </Card>
     );
@@ -209,8 +254,8 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
           </Tag>
         </Space>
         <Space size={4} wrap>
-          <Tag color={status.running ? 'blue' : 'gray'}>
-            運轉 {status.running ? '●' : '○'}
+          <Tag color={status.running ? 'blue' : startupAnomaly ? 'red' : 'gray'}>
+            運轉 {status.running ? '●' : startupAnomaly ? '✕' : '○'}
           </Tag>
           <Tag color={status.overload ? 'red' : 'gray'}>
             過載 {status.overload ? '⚠' : '○'}
@@ -219,9 +264,14 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
 
         {/* Mode display */}
         <div style={{ marginTop: 8, marginBottom: 8 }}>
-          {mode === 'auto' && (
+          {mode === 'auto' && !startupAnomaly && (
             <Text style={{ color: '#52c41a', fontWeight: 600 }}>
-              ✅ 自動模式{status.running ? '（運轉中）' : '（待機）'}
+              ✅ 自動模式{do_state ? '（運轉中）' : '（待機）'}
+            </Text>
+          )}
+          {mode === 'auto' && startupAnomaly && (
+            <Text style={{ color: '#ff4d4f', fontWeight: 600 }}>
+              🚨 啟動異常：DO 已輸出，設備未運轉
             </Text>
           )}
           {mode === 'manual' && (
@@ -255,27 +305,33 @@ function FanCard({ site, fan_type, fan_index }: FanCardProps) {
             實體切到停止位置
           </Button>
         )}
-        {mode === 'auto' && !status.running && (
-          <Button
-            type="primary"
-            block
-            icon={<PlayCircleOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(true)}
-          >
-            啟動
-          </Button>
+        {mode === 'auto' && !do_state && (
+          <Tooltip title={canControlIo ? '' : '無 I/O 控制權，無法操作風扇（需現場操作員權限；若您應有權限請重新登入刷新）'}>
+            <Button
+              type="primary"
+              block
+              icon={<PlayCircleOutlined />}
+              loading={doControl.isPending}
+              disabled={!canControlIo}
+              onClick={() => handleDOControl(true)}
+            >
+              啟動
+            </Button>
+          </Tooltip>
         )}
-        {mode === 'auto' && status.running && (
-          <Button
-            danger
-            block
-            icon={<StopOutlined />}
-            loading={doControl.isPending}
-            onClick={() => handleDOControl(false)}
-          >
-            停止
-          </Button>
+        {mode === 'auto' && do_state && (
+          <Tooltip title={canControlIo ? '' : '無 I/O 控制權，無法操作風扇（需現場操作員權限；若您應有權限請重新登入刷新）'}>
+            <Button
+              danger
+              block
+              icon={<StopOutlined />}
+              loading={doControl.isPending}
+              disabled={!canControlIo}
+              onClick={() => handleDOControl(false)}
+            >
+              停止
+            </Button>
+          </Tooltip>
         )}
       </Space>
     </Card>
@@ -330,8 +386,15 @@ function AlarmPanel() {
   const ackAlarm = useAckAlarm();
   const { message, modal } = App.useApp();
   const [ackForm] = Form.useForm<AckAlarmBody>();
+  // 件1b：ack 過載警報（reset OL relay）屬現場操作，gate can_control_io（viewer 唯讀）
+  const { user: me } = useAuth();
+  const canControlIo = !!me?.can_control_io;
 
   const openAckDialog = (alarm: ActiveAlarm) => {
+    if (!canControlIo) {
+      message.warning('無 I/O 控制權，無法處理警報（需現場操作員權限；若您應有權限請重新登入刷新）');
+      return;
+    }
     ackForm.resetFields();
     ackForm.setFieldsValue({ alarm_id: alarm.alarm_id, reason: 'reset_relay', note: '' });
     modal.confirm({
@@ -399,9 +462,11 @@ function AlarmPanel() {
               <Text type="secondary" style={{ fontSize: 12 }}>
                 Edge: {alarm.edge_id} · 觸發於 {new Date(alarm.triggered_at).toLocaleString('zh-TW')}
               </Text>
-              <Button size="small" danger onClick={() => openAckDialog(alarm)}>
-                確認警報
-              </Button>
+              <Tooltip title={canControlIo ? '' : '無 I/O 控制權，無法處理警報（若您應有權限請重新登入刷新）'}>
+                <Button size="small" danger disabled={!canControlIo} onClick={() => openAckDialog(alarm)}>
+                  確認警報
+                </Button>
+              </Tooltip>
             </Space>
           ))}
         </Space>
