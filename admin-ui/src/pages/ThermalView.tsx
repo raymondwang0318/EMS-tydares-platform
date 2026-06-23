@@ -130,11 +130,14 @@ export default function ThermalView() {
     return m;
   }, [irDevicesData]);
 
-  // thermal/meta 的 edges 已是 thermal 適用集(P12A 端 filter)；只需有 last_seen_ip 即組 SSE
+  // thermal/meta 的 edges 已是 thermal 適用集(P12A 端 filter)；只需有 last_seen_ip 即組 SSE。
+  // 路B(M-P12-141)：SSE 走 Central nginx HTTPS 中繼(admin.tydares.internal/edge-relay/{ip})，
+  // 內轉 Edge http、對外 HTTPS → 解 Mixed Content。嵌入 HTTPS 前台全綠、無人需允許不安全內容。
+  // EventSource 完整 URL 仍是 `${baseUrl}/stream/811c`（中繼 regex 已含 /stream/811c$rest）。
   const sseBaseUrls = useMemo(() => {
     return (edgesData ?? [])
       .filter((e) => e.last_seen_ip)
-      .map((e) => `http://${e.last_seen_ip}:8080`);
+      .map((e) => `https://admin.tydares.internal/edge-relay/${e.last_seen_ip}`);
   }, [edgesData]);
 
   const handleFrame = useCallback(
