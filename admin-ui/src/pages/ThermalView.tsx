@@ -203,10 +203,7 @@ export default function ThermalView() {
           now - frames[deviceId]!.receivedAt < ONLINE_STALE_MS;
         const isSelected = !!deviceId && selectedDevice === deviceId;
         return { num, deviceId, location, isOnline, isSelected };
-      })
-        // 老王 2026-06-23：離線的 TC 不顯示（不在 thermal/meta 近期上報集＝無 deviceId）。
-        // 設備停報→自動消失；送電恢復上報→自動重現。不留淡藍空格。
-        .filter((b) => b.deviceId),
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tcToInfo, frames, selectedDevice, now],
   );
