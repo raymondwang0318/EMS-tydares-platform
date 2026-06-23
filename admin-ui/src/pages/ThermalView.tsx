@@ -24,8 +24,7 @@ import type { ThermalSummary } from '../models/thermal';
 import { ThermalDisplay } from '../components/thermal/ThermalDisplay';
 import { normalizeIrdata, computeSummary } from '../utils/thermalProcessor';
 import { thermalSSEClient } from '../services/thermalSource';
-import { useIrDevices } from '../hooks/useIrDevices';
-import { useEdges } from '../hooks/useEdges';
+import { useThermalMeta } from '../hooks/useThermalMeta';
 
 const { Title } = Typography;
 
@@ -111,8 +110,10 @@ export default function ThermalView() {
   // 每 5s tick 一次：重算 isOnline（ONLINE_STALE_MS 過期判斷）
   const [, setTick] = useState(0);
 
-  const { data: irDevicesData } = useIrDevices();
-  const { data: edgesData } = useEdges();
+  // 議題C(M-PM-341)：改用 public /v1/thermal/meta(P12A)，訪客可讀；取代 admin-only useEdges/useIrDevices
+  const { data: thermalMeta } = useThermalMeta();
+  const irDevicesData = thermalMeta?.ir;
+  const edgesData = thermalMeta?.edges;
 
   /** TC 編號 → { deviceId, location } */
   const tcToInfo = useMemo(() => {
@@ -129,11 +130,11 @@ export default function ThermalView() {
     return m;
   }, [irDevicesData]);
 
+  // thermal/meta 的 edges 已是 thermal 適用集(P12A 端 filter)；只需有 last_seen_ip 即組 SSE
   const sseBaseUrls = useMemo(() => {
-    const active = (edgesData ?? []).filter(
-      (e) => (e.status === 'approved' || e.status === 'maintenance') && e.last_seen_ip,
-    );
-    return active.map((e) => `http://${e.last_seen_ip}:8080`);
+    return (edgesData ?? [])
+      .filter((e) => e.last_seen_ip)
+      .map((e) => `http://${e.last_seen_ip}:8080`);
   }, [edgesData]);
 
   const handleFrame = useCallback(
