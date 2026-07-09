@@ -10,11 +10,11 @@
  *
  * 既有 Reports.tsx 設計參考 + reuse useEnergyReport hook
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert, Button, Card, DatePicker, Empty, Select, Space, Spin, Typography,
 } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined, CameraOutlined, FilePdfOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import {
   CartesianGrid, Legend, Line, LineChart,
@@ -176,6 +176,45 @@ export default function Trends() {
 
   const selectedEcsu = sortedEcsus.find((e) => e.ecsu_id === selectedEcsuId);
 
+  // ── 匯出 jpg / PDF（老王 2026-07-09：不限權限誰都可下載；前台 iframe 同步生效）──
+  // 純前端截圖（html2canvas），不打 API；套件動態載入（點按鈕才抓 chunk，主 bundle 不變胖）
+  const exportRef = useRef<HTMLDivElement>(null);
+  const [exporting, setExporting] = useState<false | 'jpg' | 'pdf'>(false);
+  const hasChart = powerChartData.length > 0 || demandChartData.length > 0;
+
+  const exportChart = async (fmt: 'jpg' | 'pdf') => {
+    if (!exportRef.current) return;
+    setExporting(fmt);
+    try {
+      const html2canvas = (await import('html2canvas')).default;
+      const canvas = await html2canvas(exportRef.current, {
+        scale: 2, backgroundColor: '#ffffff', useCORS: true,
+      });
+      const fname = `趨勢圖_${selectedEcsu?.ecsu_code ?? 'ECSU'}_${dayjs().format('YYYYMMDD_HHmm')}`;
+      if (fmt === 'jpg') {
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/jpeg', 0.92);
+        a.download = `${fname}.jpg`;
+        a.click();
+      } else {
+        const { jsPDF } = await import('jspdf');
+        const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pw = pdf.internal.pageSize.getWidth();
+        const ph = pdf.internal.pageSize.getHeight();
+        // 等比縮放置中塞入 A4 橫式
+        const ratio = Math.min(pw / canvas.width, ph / canvas.height);
+        const w = canvas.width * ratio;
+        const h = canvas.height * ratio;
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', (pw - w) / 2, (ph - h) / 2, w, h);
+        pdf.save(`${fname}.pdf`);
+      }
+    } catch (err) {
+      alert('匯出失敗：' + (err as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div>
       <Title level={3} style={{ marginTop: 0 }}>趨勢圖</Title>
@@ -212,6 +251,23 @@ export default function Trends() {
         >
           查詢
         </Button>
+        {/* 匯出（老王 2026-07-09）：不綁權限，前台 iframe 內誰都可下載 */}
+        <Button
+          icon={<CameraOutlined />}
+          onClick={() => exportChart('jpg')}
+          loading={exporting === 'jpg'}
+          disabled={!hasChart || energyLoading}
+        >
+          匯出 jpg
+        </Button>
+        <Button
+          icon={<FilePdfOutlined />}
+          onClick={() => exportChart('pdf')}
+          loading={exporting === 'pdf'}
+          disabled={!hasChart || energyLoading}
+        >
+          匯出 PDF
+        </Button>
       </Space>
 
       {/* 前台 iframe 嵌入時隱藏後台工程提示（老王 2026-06-12）；後台直接訪問保留 */}
@@ -236,6 +292,15 @@ export default function Trends() {
         />
       )}
 
+      {/* 匯出範圍容器：標題列 + 兩張圖一起截（jpg/PDF 內容 = 這個 div）*/}
+      <div ref={exportRef} style={{ background: '#fff', padding: 4 }}>
+      {queriedRange && selectedEcsu && (
+        <Text type="secondary" style={{ display: 'block', fontSize: 12, margin: '0 0 8px 4px' }}>
+          {selectedEcsu.ecsu_code} · {selectedEcsu.region ?? '—'} · {selectedEcsu.ecsu_name}
+          ｜{queriedRange[0].format('YYYY-MM-DD HH:mm')} ~ {queriedRange[1].format('YYYY-MM-DD HH:mm')}
+          ｜粒度 {granularity}
+        </Text>
+      )}
       <Card title="用電趨勢（總功率 W；ECSU 聚合）" size="small" style={{ marginBottom: 16 }}>
         {energyLoading ? (
           <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
@@ -274,6 +339,7 @@ export default function Trends() {
           </ResponsiveContainer>
         )}
       </Card>
+      </div>
     </div>
   );
 }

@@ -523,8 +523,9 @@ export default function Edges() {
         columns={columns}
         // 20/page 下拉修（老王 2026-06-25 回報無法操作）：sizeChanger 的下拉掛到 body，
         // 跳出 Table scroll 容器的 overflow/z-index 陷阱；並明確給選項
+        // defaultPageSize（非受控）：寫死 pageSize 會把使用者的切換蓋回 20（7/9 老王回報「點得開切不了」根因）
         pagination={{
-          pageSize: 20,
+          defaultPageSize: 20,
           pageSizeOptions: [10, 20, 50, 100],
           showSizeChanger: { getPopupContainer: () => document.body },
         }}
