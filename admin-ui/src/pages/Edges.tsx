@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Tag, Spin } from 'antd';
-import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined, ClearOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Table, Typography, Space, Button, Modal, Input, App, Tooltip, Alert, Tag, Spin, Radio, Empty } from 'antd';
+import { ReloadOutlined, CheckOutlined, StopOutlined, ToolOutlined, PlayCircleOutlined, SyncOutlined, ScanOutlined, ClearOutlined, DeleteOutlined, LineChartOutlined } from '@ant-design/icons';
+import { useQuery } from '@tanstack/react-query';
+// CPU 溫度履歷曲線（老王 2026-07-09）：recharts 已是專案依賴（Trends 頁同款），不新增套件
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, ReferenceLine,
+  Tooltip as RechartsTooltip, ResponsiveContainer,
+} from 'recharts';
 import type { ColumnsType } from 'antd/es/table';
 import { StatusTag } from '../components/common/StatusTag';
 import {
@@ -73,6 +79,8 @@ export default function Edges() {
   const [revokeReason, setRevokeReason] = useState('');
   const [drawerEdge, setDrawerEdge] = useState<Edge | null>(null);
   const [scanEdgeId, setScanEdgeId] = useState<string | null>(null);
+  // CPU 溫度履歷彈窗（老王 2026-07-09：後台查詢，資料源 ems_edge_heartbeat.cpu_temp_c）
+  const [tempEdgeId, setTempEdgeId] = useState<string | null>(null);
 
   const renameHostname = useRenameEdgeHostname();
   const renameEdgeName = useRenameEdgeName();
@@ -413,6 +421,13 @@ export default function Edges() {
                 掃描設備
               </Button>
             )}
+            <Button
+              size="small"
+              icon={<LineChartOutlined />}
+              onClick={() => setTempEdgeId(edge.edge_id)}
+            >
+              溫度履歷
+            </Button>
             {canMaintenance && (
               <Button size="small" icon={<ToolOutlined />} onClick={() => handleMaintenance(edge)} loading={maintenance.isPending}>
                 維護
@@ -506,7 +521,13 @@ export default function Edges() {
         loading={isLoading}
         dataSource={edges ?? []}
         columns={columns}
-        pagination={{ pageSize: 20, showSizeChanger: true }}
+        // 20/page 下拉修（老王 2026-06-25 回報無法操作）：sizeChanger 的下拉掛到 body，
+        // 跳出 Table scroll 容器的 overflow/z-index 陷阱；並明確給選項
+        pagination={{
+          pageSize: 20,
+          pageSizeOptions: [10, 20, 50, 100],
+          showSizeChanger: { getPopupContainer: () => document.body },
+        }}
         // 表頭固定（老王 2026-06-10）：表體在視窗高度內捲動，欄名固定最上方
         scroll={{ x: 1290, y: 'calc(100vh - 330px)' }}
         size="middle"
@@ -541,7 +562,80 @@ export default function Edges() {
       </Modal>
 
       <EdgeDrawer edge={drawerEdge} open={!!drawerEdge} onClose={() => setDrawerEdge(null)} />
+
+      <TempHistoryModal edgeId={tempEdgeId} onClose={() => setTempEdgeId(null)} />
     </div>
+  );
+}
+
+/**
+ * CPU 溫度履歷彈窗（老王 2026-07-09：後台 Edge 管理頁查詢）
+ * 資料：GET /admin/edges/{edge_id}/cpu-temp-history?hours=N
+ *（ems_edge_heartbeat.payload_json.cpu_temp_c，bucket 隨範圍自適應，台北時間）
+ * 參考線 80/85°C 對齊既有 edge CPU 過溫告警閾值（M-P11-E52/E53）。
+ */
+const TEMP_RANGES = [
+  { label: '24 小時', hours: 24 },
+  { label: '3 天', hours: 72 },
+  { label: '7 天', hours: 168 },
+  { label: '30 天', hours: 720 },
+];
+
+function TempHistoryModal({ edgeId, onClose }: { edgeId: string | null; onClose: () => void }) {
+  const [hours, setHours] = useState(24);
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['edge-cpu-temp-history', edgeId, hours],
+    enabled: !!edgeId,
+    queryFn: async ({ signal }) => {
+      const { data } = await api.get<{ t: string; avg_c: number; max_c: number }[]>(
+        `/admin/edges/${edgeId}/cpu-temp-history`,
+        { params: { hours }, timeout: 15_000, signal },
+      );
+      return data;
+    },
+  });
+
+  return (
+    <Modal
+      title={`CPU 溫度履歷 — ${edgeId ?? ''}`}
+      open={!!edgeId}
+      onCancel={onClose}
+      footer={null}
+      width={860}
+      destroyOnHidden
+    >
+      <Space style={{ marginBottom: 12 }}>
+        <Radio.Group
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          optionType="button"
+          buttonStyle="solid"
+          options={TEMP_RANGES.map((r) => ({ label: r.label, value: r.hours }))}
+        />
+        <Text type="secondary">虛線 80 / 85°C 為過溫告警門檻</Text>
+      </Space>
+
+      {isLoading && <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>}
+      {!isLoading && !!error && <Alert type="error" message="溫度履歷載入失敗，請重試" showIcon />}
+      {!isLoading && !error && (!data || data.length === 0) && (
+        <Empty description="此範圍內沒有溫度資料" style={{ padding: 32 }} />
+      )}
+      {!isLoading && !error && data && data.length > 0 && (
+        <ResponsiveContainer width="100%" height={380}>
+          <LineChart data={data} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="t" tick={{ fontSize: 11 }} minTickGap={48} />
+            <YAxis unit="°C" domain={['dataMin - 3', 'dataMax + 5']} tick={{ fontSize: 11 }} />
+            <RechartsTooltip formatter={(v) => `${v ?? '—'}°C`} />
+            <Legend />
+            <ReferenceLine y={80} stroke="#faad14" strokeDasharray="4 4" />
+            <ReferenceLine y={85} stroke="#ff4d4f" strokeDasharray="4 4" />
+            <Line type="monotone" dataKey="avg_c" name="平均溫度" stroke="#52c41a" dot={false} strokeWidth={2} />
+            <Line type="monotone" dataKey="max_c" name="最高溫度" stroke="#fa8c16" dot={false} strokeWidth={1.5} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </Modal>
   );
 }
 
