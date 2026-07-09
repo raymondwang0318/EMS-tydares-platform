@@ -279,7 +279,12 @@ export default function AnomalyHistory() {
         dataSource={items}
         columns={columns}
         size="small"
-        pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (t) => `${t} 筆` }}
+        pagination={{
+          defaultPageSize: 50,
+          pageSizeOptions: [10, 20, 50, 100],
+          showSizeChanger: { getPopupContainer: () => document.body },
+          showTotal: (t) => `${t} 筆`,
+        }}
         // 表頭固定（老王 2026-06-10）：表體在視窗高度內捲動，欄名固定最上方
         scroll={{ y: 'calc(100vh - 360px)' }}
         expandable={{

@@ -456,7 +456,11 @@ export default function AlertsHistory() {
                     dataSource={filteredActive}
                     rowKey="alert_id"
                     size="small"
-                    pagination={{ pageSize: 20 }}
+                    pagination={{
+                      defaultPageSize: 20,
+                      pageSizeOptions: [10, 20, 50, 100],
+                      showSizeChanger: { getPopupContainer: () => document.body },
+                    }}
                   />
                 )}
               </Card>
@@ -479,7 +483,11 @@ export default function AlertsHistory() {
                     dataSource={filteredHistory}
                     rowKey={(r) => `${r.ts}-${r.alert_id ?? 'noalert'}-${r.event_type}-${r.rule_id}`}
                     size="small"
-                    pagination={{ pageSize: 20 }}
+                    pagination={{
+                      defaultPageSize: 20,
+                      pageSizeOptions: [10, 20, 50, 100],
+                      showSizeChanger: { getPopupContainer: () => document.body },
+                    }}
                   />
                 )}
               </Card>

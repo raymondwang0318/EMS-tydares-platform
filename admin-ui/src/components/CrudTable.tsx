@@ -183,7 +183,12 @@ export default function CrudTable({
         rowKey={rowKey}
         loading={loading}
         size="middle"
-        pagination={{ pageSize: 20 }}
+        // defaultPageSize（非受控）：pageSize 寫死會把使用者的切換蓋回去（7/9 老王回報，CrudTable 全頁通用修）
+        pagination={{
+          defaultPageSize: 20,
+          pageSizeOptions: [10, 20, 50, 100],
+          showSizeChanger: { getPopupContainer: () => document.body },
+        }}
         scroll={scrollY ? { y: scrollY } : undefined}
       />
 

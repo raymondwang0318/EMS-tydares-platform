@@ -303,7 +303,11 @@ export default function IrDevices() {
           loading={isLoading}
           size="middle"
           tableLayout="fixed"
-          pagination={{ pageSize: 20 }}
+          pagination={{
+            defaultPageSize: 20,
+            pageSizeOptions: [10, 20, 50, 100],
+            showSizeChanger: { getPopupContainer: () => document.body },
+          }}
           locale={{ emptyText: 'trx_reading 尚無 811c_* 資料；待 Edge 採集後自動出現' }}
         />
       </div>
