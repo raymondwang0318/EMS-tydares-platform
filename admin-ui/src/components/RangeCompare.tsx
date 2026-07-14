@@ -14,12 +14,12 @@
  *   （runtime 實測：energy_delta 僅 energy 類 param 非 null，其餘 param 為 null → 直接全 sum 安全）
  * 併發：chunk 8 並行 + 進度顯示；僅查有勾選的 ECSU。
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Alert, Button, Card, Col, DatePicker, Empty, Row, Select, Space, Spin,
   Statistic, Table, Tag, Typography, message,
 } from 'antd';
-import { SearchOutlined, FileExcelOutlined, FileTextOutlined } from '@ant-design/icons';
+import { SearchOutlined, FileExcelOutlined, FileTextOutlined, CameraOutlined, FilePdfOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
 import {
@@ -257,6 +257,45 @@ export default function RangeCompare() {
   const exportName = (ext: string) =>
     `Tydares_${resultSame ? '期間用電累積' : '區間用電比較'}_${dayjs().format('YYYYMMDD_HH')}.${ext}`;
 
+  // ── 圖形輸出 jpg/PDF（老王 2026-07-13 掛單）：整個結果區（KPI+長條圖+明細表）截圖 ──
+  // 套件動態載入（Trends.tsx 同模式，主 bundle 零變胖）；截圖前先展開表格內捲軸（否則只截可視部分）
+  const exportRef = useRef<HTMLDivElement>(null);
+  const [imgExporting, setImgExporting] = useState<false | 'jpg' | 'pdf'>(false);
+
+  const exportChart = async (fmt: 'jpg' | 'pdf') => {
+    if (!exportRef.current) return;
+    setImgExporting(fmt); // Table scroll 解除 → 完整展開
+    await new Promise((r) => setTimeout(r, 250)); // 等 re-render 完成
+    try {
+      const html2canvas = (await import('html2canvas')).default;
+      const canvas = await html2canvas(exportRef.current, {
+        scale: 2, backgroundColor: '#ffffff', useCORS: true,
+      });
+      if (fmt === 'jpg') {
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/jpeg', 0.92);
+        a.download = exportName('jpg');
+        a.click();
+      } else {
+        const { jsPDF } = await import('jspdf');
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const pw = pdf.internal.pageSize.getWidth();
+        const ph = pdf.internal.pageSize.getHeight();
+        const margin = 8;
+        const ratio = Math.min((pw - margin * 2) / canvas.width, (ph - margin * 2) / canvas.height);
+        const w = canvas.width * ratio;
+        const h = canvas.height * ratio;
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', (pw - w) / 2, margin, w, h);
+        pdf.save(exportName('pdf'));
+      }
+      message.success(`已匯出 ${fmt.toUpperCase()}`);
+    } catch (err) {
+      message.error('圖形匯出失敗：' + (err as Error).message);
+    } finally {
+      setImgExporting(false);
+    }
+  };
+
   return (
     <div>
       {/* Filter bar */}
@@ -311,7 +350,12 @@ export default function RangeCompare() {
       {queried && !loading && rows.length === 0 && <Empty description="無資料" />}
 
       {rows.length > 0 && (
-        <>
+        <div ref={exportRef} style={{ background: '#fff', padding: 4 }}>
+          {/* 匯出脈絡標題列（圖形輸出時把期間與產出時間帶進畫面） */}
+          <Text type="secondary" style={{ display: 'block', fontSize: 12, margin: '0 0 8px 4px' }}>
+            {resultSame ? `週期總累積：${labelA}` : `區間用電比較：期間A ${labelA} vs 期間B ${labelB}`}
+            ｜產出 {dayjs().format('YYYY-MM-DD HH:mm')}
+          </Text>
           {/* 總計 KPI：累積模式單卡 / 比較模式 4 卡 */}
           {resultSame ? (
             <Row gutter={16} style={{ marginBottom: 16 }}>
@@ -365,6 +409,15 @@ export default function RangeCompare() {
                   onClick={() => { exportToCsv({ rows, columns: exportColumns, filename: exportName('csv'), sheetName: '區間用電比較' }); message.success('已匯出 CSV'); }}>
                   CSV
                 </Button>
+                {/* 圖形輸出（老王 2026-07-13）：KPI+長條圖+明細表一頁式 */}
+                <Button size="small" icon={<CameraOutlined />} loading={imgExporting === 'jpg'}
+                  onClick={() => exportChart('jpg')}>
+                  jpg
+                </Button>
+                <Button size="small" icon={<FilePdfOutlined />} loading={imgExporting === 'pdf'}
+                  onClick={() => exportChart('pdf')}>
+                  PDF
+                </Button>
               </Space>
             }
           >
@@ -375,7 +428,8 @@ export default function RangeCompare() {
                 dataSource={rows}
                 size="small"
                 pagination={false}
-                scroll={{ y: 'calc(100vh - 420px)' }}
+                // 圖形輸出時解除內捲軸 → 表格完整展開讓 html2canvas 截到全部列
+                scroll={imgExporting ? undefined : { y: 'calc(100vh - 420px)' }}
                 summary={() => (
                   <Table.Summary fixed>
                     <Table.Summary.Row>
@@ -394,7 +448,7 @@ export default function RangeCompare() {
               />
             )}
           </Card>
-        </>
+        </div>
       )}
     </div>
   );
