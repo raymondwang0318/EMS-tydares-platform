@@ -19,10 +19,15 @@ async def store_records(
     edge_id: str,
     device_id: str,
     records: list[IngestRecord],
+    channel: str | None = None,
 ) -> tuple[int, int]:
     """寫入 inbox，冪等 ON CONFLICT DO NOTHING。
 
     回傳 (accepted, duplicated)。
+
+    channel（M-PM-345 雙 channel）：'A'(即時)/'B'(歷史補)/None(legacy 單軌)；
+    透傳入 ems_ingest_inbox.channel 供 Central 分別記 A/B 消化率（§六 P12A 配套）。
+    向後相容：channel=None 時欄位寫 NULL，不影響既有單軌 fleet。
     """
     accepted = 0
     duplicated = 0
@@ -36,10 +41,10 @@ async def store_records(
         result = await db.execute(
             text("""
                 INSERT INTO ems_ingest_inbox
-                    (idemp_key, edge_id, device_id, source_type, msg_ts, payload_json)
+                    (idemp_key, edge_id, device_id, source_type, msg_ts, payload_json, channel)
                 VALUES
                     (:idemp_key, :edge_id, :device_id, :source_type, :msg_ts,
-                     CAST(:payload_json AS JSONB))
+                     CAST(:payload_json AS JSONB), :channel)
                 ON CONFLICT (idemp_key) DO NOTHING
             """),
             {
@@ -49,6 +54,7 @@ async def store_records(
                 "source_type": rec.source_type,
                 "msg_ts": msg_ts,
                 "payload_json": json.dumps(rec.payload),
+                "channel": channel,
             },
         )
         if (result.rowcount or 0) > 0:

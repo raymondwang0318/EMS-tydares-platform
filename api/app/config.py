@@ -25,6 +25,20 @@ class Settings(BaseSettings):
     # Server
     log_level: str = "info"
 
+    # Session cookie domain — 跨子網域同享（M-PM-328 軌3 Pananora 硬模式前置）。
+    # 空=host-only（現狀）；設 ".tydares.internal" → 僅該網域主機名登入帶 Domain，
+    # IP/LAN 存取（現地 192.168.10.X / 在家 100.70.196.32）維持 host-only 不被擋。
+    session_cookie_domain: str = Field(default="", description="env SESSION_COOKIE_DOMAIN；空=host-only")
+
+    # SMTP — mail 通知（M-PM-313 P3）。選填；未設→Mail Worker 略過發送（不報錯）。
+    # 由 env 注入（老王階段2 部署時設；不入庫明碼/不進 git）。
+    smtp_host: str = Field(default="", description="env SMTP_HOST；空=停用 mail 發送")
+    smtp_port: int = Field(default=587, description="env SMTP_PORT")
+    smtp_user: str = Field(default="", description="env SMTP_USER")
+    smtp_password: str = Field(default="", description="env SMTP_PASSWORD")
+    smtp_tls: bool = Field(default=True, description="env SMTP_TLS；STARTTLS")
+    mail_from: str = Field(default="", description="env MAIL_FROM；空→fallback smtp_user")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

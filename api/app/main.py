@@ -5,22 +5,33 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import engine
+from app.dependencies import get_db
 from app.routers import (
     v1_admin,
+    v1_admin_alarms,
+    v1_admin_events,
+    v1_admin_fleet,
+    v1_admin_ingest,
     v1_admin_io,
+    v1_admin_users,
     v1_alerts,
+    v1_auth,
+    v1_boss,
     v1_circuits,
     v1_commands,
     v1_edge,
     v1_health,
     v1_ingest,
     v1_reports,
+    v1_thermal,
 )
 
 
@@ -69,11 +80,32 @@ app.include_router(v1_health.router)
 app.include_router(v1_edge.router)
 app.include_router(v1_ingest.router)
 app.include_router(v1_commands.router)
+app.include_router(v1_auth.router)   # M-PM-309 登入（不掛 verify_admin_token）
 app.include_router(v1_admin.router)
 app.include_router(v1_admin_io.router)
+app.include_router(v1_admin_alarms.router)
+app.include_router(v1_admin_events.router)
+app.include_router(v1_admin_users.router)   # 用戶管理（2026-06-11）
+app.include_router(v1_admin_fleet.router)   # Fleet 健康 + ECSU 綁定全掃（M-PM-328 軌1）
+app.include_router(v1_admin_ingest.router)  # 雙 channel 消化率（M-PM-345 §六 P12A 配套）
+app.include_router(v1_boss.router)
 app.include_router(v1_circuits.router)
 app.include_router(v1_reports.router)
 app.include_router(v1_alerts.router)
+app.include_router(v1_thermal.router)   # M-PM-341 議題C 熱力圖 Open View（public，不掛 verify_admin_token）
+
+
+# --- 容器 healthcheck（M-PM-335 §3.4）：查 DB 確認真實健康 ---
+# docker-compose healthcheck 打 GET /health；DB 連得上→200、DB down→503→容器 unhealthy 可被偵測。
+# 修正 M-PM-334 根因：舊 /health 被下方 serve_frontend catch-all 接、回 index.html 永遠 200，
+# 導致 DB down 3 天卻顯示 healthy。須在 serve_frontend（/{full_path}）之前註冊才會匹配。
+@app.get("/health")
+async def health_check(db: AsyncSession = Depends(get_db)):
+    try:
+        await db.execute(text("SELECT 1"))
+        return {"status": "healthy", "db": "connected"}
+    except Exception:
+        raise HTTPException(status_code=503, detail="DB unavailable")
 
 
 # --- Serve React UI static files (no nginx needed) ---

@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.services.wakeup_service import send_wakeup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("worker")
@@ -29,6 +30,8 @@ BATCH_SIZE = 200
 POLL_INTERVAL_SEC = 2.0
 INBOX_RETENTION_SEC = 3600        # 1 小時
 CLEANUP_INTERVAL_SEC = 300        # 5 分鐘
+STALE_DELIVERED_TIMEOUT_SEC = 300  # DELIVERED 超過 5 分鐘視為孤兒
+STALE_CHECK_INTERVAL_SEC = 120     # 每 2 分鐘掃一次孤兒指令
 
 
 def _ts_from_ms(ts_ms: int | None, fallback: datetime) -> datetime:
@@ -261,12 +264,49 @@ async def cleanup_inbox(session_factory: async_sessionmaker) -> int:
         return result.rowcount or 0
 
 
+async def requeue_stale_commands(session_factory: async_sessionmaker) -> int:
+    """重置孤兒 DELIVERED 指令為 QUEUED，並觸發 Edge 喚醒拉取。
+
+    場景：Edge 從 DB 拉取指令（QUEUED→DELIVERED）後，進程重啟，新進程不知道
+    舊進程已領取的 DELIVERED 指令 → 指令永久卡住。
+    解法：DELIVERED 超過 STALE_DELIVERED_TIMEOUT_SEC 秒 → 重置 QUEUED，
+    對受影響 Edge 發 wakeup，Edge 在下次輪詢（最慢 30s，有 wakeup 則 ~1s）拉取。
+
+    Refs: ADR-026 DR-026-01；M-PM-XXX（E15 stuck DELIVERED 2026-05-25）
+    """
+    async with session_factory() as db:
+        result = await db.execute(
+            text("""
+                UPDATE ems_commands
+                SET status = 'QUEUED', updated_at = NOW()
+                WHERE status = 'DELIVERED'
+                  AND updated_at < NOW() - make_interval(secs => :timeout)
+                RETURNING command_id, edge_id
+            """),
+            {"timeout": STALE_DELIVERED_TIMEOUT_SEC},
+        )
+        rows = result.fetchall()
+        await db.commit()
+
+    if rows:
+        affected_edges: set[str] = set()
+        for cmd_id, edge_id in rows:
+            log.warning("stale DELIVERED requeued: cmd=%s edge=%s", cmd_id, edge_id)
+            affected_edges.add(edge_id)
+        # 對每個受影響的 edge 觸發 wakeup（去重；send_wakeup 為同步函式，在 thread 執行）
+        for edge_id in affected_edges:
+            asyncio.create_task(asyncio.to_thread(send_wakeup, edge_id))
+
+    return len(rows)
+
+
 async def main():
     engine = create_async_engine(settings.database_url, pool_size=5, max_overflow=5)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     log.info("V2-final worker starting (ADR-026)")
     last_cleanup = time.monotonic()
+    last_stale_check = time.monotonic()
 
     # T-S11C-002 Phase β: alert evaluator loop（ADR-028 §8）
     # 同 container 的 asyncio task；單 worker 部署 OK，多 worker 待轉 Redis state
@@ -274,25 +314,73 @@ async def main():
     alert_task = asyncio.create_task(alert_evaluator_loop(session_factory))
     log.info("alert_evaluator launched (T-S11C-002 ADR-028)")
 
+    # 遠端 I/O 啟動異常 watcher（老王 2026-06-05）：DO 已輸出但 DI 運轉未觸發 >20s
+    # → 寫 ems_events（event_kind=operation）→ DB trigger pg_notify → 事件履歷頁可見。
+    from app.io_anomaly_watcher import io_anomaly_watcher_loop
+    io_anomaly_task = asyncio.create_task(io_anomaly_watcher_loop(session_factory))
+    log.info("io_anomaly_watcher launched (老王 2026-06-05)")
+
+    # Edge 心跳看門狗（M-PM-358 Phase 1，老王 2026-07-13 拍板）：整台 edge 失聯 30h→分鐘級。
+    # 心跳 gap>10min → 開 ems_events（kind='edge_outage', source='central_heartbeat'）
+    # → mail_worker 既有 edge_outage 分流發信；去重對齊止血層（M-P11-E122）。
+    from app.edge_hb_watcher import edge_hb_watcher_loop
+    edge_hb_task = asyncio.create_task(edge_hb_watcher_loop(session_factory))
+    log.info("edge_hb_watcher launched (M-PM-358 Phase 1)")
+
+    # 811C 熱像三級閾值告警 evaluator（M-PM-313；雙簽 GO 2026-06-08）：讀 trx_reading
+    # max_temp × ems_alarm_rule 三級閾值 → 寫 ems_events（event_kind=thermal_alarm），
+    # critical 自動 notify_pananora；向上跨越防洗版；< 60°C×5min 自動解除。純 Central 零 Edge。
+    from app.alarm_evaluator import alarm_evaluator_loop
+    alarm_eval_task = asyncio.create_task(alarm_evaluator_loop(session_factory))
+    log.info("alarm_evaluator launched (M-PM-313 thermal 三級閾值)")
+
+    # 異常通知 Mail Worker（M-PM-313 P3）：notify_pananora 且未解除 → 升級降頻發 mail
+    # （0/4h/12h/24h）。SMTP 由 .env 注入；未設則略過發送（不報錯）。
+    from app.mail_worker import mail_worker_loop
+    mail_task = asyncio.create_task(mail_worker_loop(session_factory))
+    log.info("mail_worker launched (M-PM-313 升級降頻通知)")
+
+    # 雙 channel ingest 消化率 watcher（M-PM-345 §六 P12A 配套）：OBSERVE-ONLY log
+    # A/B/NULL 消化率；告警閾值待 PM 拍板（M-P12-139）。同 io_anomaly_watcher asyncio task。
+    from app.ingest_digest_watcher import ingest_digest_watcher_loop
+    ingest_digest_task = asyncio.create_task(ingest_digest_watcher_loop(session_factory))
+    log.info("ingest_digest_watcher launched (M-PM-345 §六 OBSERVE-ONLY)")
+
     try:
         while True:
-            success, failed = await process_batch(session_factory)
-            if success or failed:
-                log.info("batch: success=%d failed=%d", success, failed)
-            if (success + failed) == 0:
-                await asyncio.sleep(POLL_INTERVAL_SEC)
+            try:
+                success, failed = await process_batch(session_factory)
+                if success or failed:
+                    log.info("batch: success=%d failed=%d", success, failed)
+                if (success + failed) == 0:
+                    await asyncio.sleep(POLL_INTERVAL_SEC)
 
-            # 週期清理
-            if time.monotonic() - last_cleanup > CLEANUP_INTERVAL_SEC:
-                deleted = await cleanup_inbox(session_factory)
-                log.info("cleanup tick: deleted=%d old inbox rows", deleted)
-                last_cleanup = time.monotonic()
+                # 週期清理 inbox
+                if time.monotonic() - last_cleanup > CLEANUP_INTERVAL_SEC:
+                    deleted = await cleanup_inbox(session_factory)
+                    log.info("cleanup tick: deleted=%d old inbox rows", deleted)
+                    last_cleanup = time.monotonic()
+
+                # 孤兒指令重置（DELIVERED 超時 → QUEUED + wakeup）
+                if time.monotonic() - last_stale_check > STALE_CHECK_INTERVAL_SEC:
+                    requeued = await requeue_stale_commands(session_factory)
+                    if requeued:
+                        log.warning("stale_check: requeued=%d DELIVERED→QUEUED commands", requeued)
+                    last_stale_check = time.monotonic()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A1-B2：主迴圈單輪異常不得讓整個 worker 容器退出（會連帶殺掉
+                # 全部告警 loop）；與各子 loop 同精神——log 後退避續跑。
+                log.exception("main ingest loop tick failed; retrying")
+                await asyncio.sleep(POLL_INTERVAL_SEC)
     finally:
-        alert_task.cancel()
-        try:
-            await alert_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for _t in (alert_task, io_anomaly_task, edge_hb_task, alarm_eval_task, mail_task, ingest_digest_task):
+            _t.cancel()
+            try:
+                await _t
+            except (asyncio.CancelledError, Exception):
+                pass
         await engine.dispose()
 
 

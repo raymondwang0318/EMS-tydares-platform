@@ -36,8 +36,9 @@ from app.constants.io_topology import (
     list_fans_template,
     list_sites,
 )
-from app.dependencies import get_db, verify_admin_token
+from app.dependencies import get_db, verify_admin_token, get_current_admin
 from app.services import command_service
+from app.services.wakeup_service import send_wakeup
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,45 @@ router = APIRouter(
     tags=["admin-io"],
     dependencies=[Depends(verify_admin_token)],
 )
+
+
+# ============================================================================
+# Device-ID helpers — prefix normalization + IO-kind inference
+#
+# Background (2026-05-28 P10D):
+#   UI generates device_id with device_kind as prefix:
+#     tcs300b03_di-TYDARES-E22-slave1  (what UI sends)
+#     tcs300b04_do-TYDARES-E22-slave4
+#   DB/Edge store device_id with device_type prefix (Edge v11_main.py
+#     _extract_driver_from_device_id does split("-",1)[0] → must be
+#     "tcs300b03"/"tcs300b04"):
+#     tcs300b03-TYDARES-E22-slave1     (what DB has)
+#     tcs300b04-TYDARES-E22-slave4
+#   DB device_kind = 'modbus_meter' (schema CHECK constraint limits to
+#     modbus_meter|thermal|relay|bacnet|other; can't store tcs300b03_di).
+#   Fix: normalize incoming device_id for DB lookup; infer IO kind from
+#   device_id prefix instead of reading stored device_kind.
+# ============================================================================
+
+def _normalize_device_id(device_id: str) -> str:
+    """Normalize UI device_id prefix (tcs300b03_di- / tcs300b04_do-) to DB prefix."""
+    if device_id.startswith("tcs300b03_di-"):
+        return "tcs300b03-" + device_id[len("tcs300b03_di-"):]
+    if device_id.startswith("tcs300b04_do-"):
+        return "tcs300b04-" + device_id[len("tcs300b04_do-"):]
+    return device_id
+
+
+def _infer_io_kind(db_device_id: str) -> str | None:
+    """Infer IO device_kind from normalized (DB-form) device_id prefix.
+
+    Returns 'tcs300b03_di', 'tcs300b04_do', or None if not an IO device.
+    """
+    if db_device_id.startswith("tcs300b03-"):
+        return "tcs300b03_di"
+    if db_device_id.startswith("tcs300b04-"):
+        return "tcs300b04_do"
+    return None
 
 
 # ============================================================================
@@ -132,17 +172,19 @@ async def list_site_fans(
     fans = list_fans_template()
 
     # 查該場域所有 tcs300b03/04 device（fleet 24 device fan-out）
+    # Use device_id prefix filter (DB device_kind = 'modbus_meter' for all Modbus devices;
+    # IO kind inferred from device_id prefix — see _infer_io_kind helper).
     rows = (await db.execute(text("""
-        SELECT device_id, device_kind FROM ems_device
+        SELECT device_id FROM ems_device
         WHERE edge_id = :edge_id
-          AND device_kind = ANY(:io_kinds)
+          AND (device_id LIKE 'tcs300b03-%' OR device_id LIKE 'tcs300b04-%')
           AND deleted_at IS NULL
         ORDER BY device_id
-    """), {
-        "edge_id": site["edge_id"],
-        "io_kinds": list(IO_DEVICE_KINDS),
-    })).fetchall()
-    io_devices = [{"device_id": r[0], "device_kind": r[1]} for r in rows]
+    """), {"edge_id": site["edge_id"]})).fetchall()
+    io_devices = [
+        {"device_id": r[0], "device_kind": _infer_io_kind(r[0])}
+        for r in rows
+    ]
 
     return {
         "site_code": site["site_code"],
@@ -166,16 +208,21 @@ async def list_io_devices(
     device_kind: str | None = Query(None, description="filter tcs300b03_di | tcs300b04_do"),
     db: AsyncSession = Depends(get_db),
 ):
-    """列遠端 I/O 設備（device_kind in {tcs300b03_di, tcs300b04_do}）."""
-    where = ["d.device_kind = ANY(:io_kinds)", "d.deleted_at IS NULL"]
-    params: dict[str, Any] = {"io_kinds": list(IO_DEVICE_KINDS)}
+    """列遠端 I/O 設備（device_id prefix: tcs300b03- / tcs300b04-）."""
+    # Use device_id prefix filter; device_kind inferred in Python (DB stores 'modbus_meter').
+    where = [
+        "(d.device_id LIKE 'tcs300b03-%' OR d.device_id LIKE 'tcs300b04-%')",
+        "d.deleted_at IS NULL",
+    ]
+    params: dict[str, Any] = {}
 
     if device_kind:
         if device_kind not in IO_DEVICE_KINDS:
             raise HTTPException(status_code=422,
                                 detail=f"device_kind must be one of {sorted(IO_DEVICE_KINDS)}")
-        where = ["d.device_kind = :device_kind", "d.deleted_at IS NULL"]
-        params["device_kind"] = device_kind
+        # map device_kind to the corresponding device_id prefix
+        _kind_prefix = {"tcs300b03_di": "tcs300b03-%", "tcs300b04_do": "tcs300b04-%"}
+        where = [f"d.device_id LIKE '{_kind_prefix[device_kind]}'", "d.deleted_at IS NULL"]
 
     if site_code:
         site = get_site(site_code)
@@ -198,7 +245,7 @@ async def list_io_devices(
         "devices": [
             {
                 "device_id": r[0],
-                "device_kind": r[1],
+                "device_kind": _infer_io_kind(r[0]) or r[1],  # infer from prefix; fall back to DB
                 "edge_id": r[2],
                 "site_code": EDGE_TO_SITE.get(r[2]),
                 "display_name": r[3],
@@ -217,36 +264,153 @@ async def get_device_status(
     device_id: str = Path(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """即時 DI 狀態 + DO state.
+    """即時 DI 狀態 + DO state（從 trx_reading 取最新 15 分鐘內 channel 狀態）.
 
-    vault SSOT §4.5 期望：FC03 read holding register @ 0x0000 → 16-bit mask → 16 bool channels
+    vault SSOT §4.5：FC03 read holding register → 16-bit channel states.
 
-    ⚠️ Stub：trx_io_reading 未 ingest（M-PM-245 §A 升報 #1）→ 回 placeholder + 提示.
-    P10C 補 ingest 後改為 SELECT latest value from trx_io_reading.
+    device_id 接受 UI 格式（tcs300b03_di- prefix）或 DB 格式（tcs300b03- prefix）；
+    內部統一 normalize 後查 DB 和 trx_reading。
+
+    回傳 channels 格式（前端 useRemoteIO.ts 期待）：
+        [{"channel": 1, "state": 0/1}, {"channel": 2, "state": 0/1}, ...]
+    data_source: "trx_io_reading"（有資料）或 "pending_ingest"（無資料）
+
+    device_id fallback：
+        edge 使用 env-var fallback 時上報格式為 tcs300b03-{SITE_CODE}-DI{N}，
+        與 ems_device 中的 tcs300b03-{edge_id}-slave{N} 不同。
+        若 exact device_id 查不到資料，則從 ems_ingest_inbox 找該 edge 實際上報的
+        tcs300b03 device_id，依 slave_id 序號取對應索引。
     """
+    import re as _re
+
+    db_device_id = _normalize_device_id(device_id)
+
     row = (await db.execute(text("""
         SELECT device_id, device_kind, edge_id, display_name
         FROM ems_device
         WHERE device_id = :device_id AND deleted_at IS NULL
-    """), {"device_id": device_id})).fetchone()
+    """), {"device_id": db_device_id})).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"device_id '{device_id}' not found")
-    if row[1] not in IO_DEVICE_KINDS:
+
+    inferred_kind = _infer_io_kind(db_device_id)
+    if inferred_kind is None or inferred_kind not in IO_DEVICE_KINDS:
         raise HTTPException(status_code=422,
-                            detail=f"device_id '{device_id}' is not an I/O device (kind={row[1]})")
+                            detail=f"device_id '{device_id}' is not an I/O device")
+
+    edge_id: str = row[2]
+
+    def _query_trx(did: str):
+        return db.execute(text("""
+            SELECT DISTINCT ON (parameter_code)
+                parameter_code, value, ts
+            FROM trx_reading
+            WHERE device_id = :device_id
+              AND ts > NOW() - INTERVAL '15 minutes'
+            ORDER BY parameter_code, ts DESC
+        """), {"device_id": did})
+
+    # 主查：exact device_id
+    ch_rows = (await _query_trx(db_device_id)).fetchall()
+
+    # 備查：edge env-var fallback 會產生不同 device_id
+    #   DI: tcs300b03-TYDARES-DI{N}（slave N）
+    #   DO: tcs300b04-TYDARES-DO1（固定 1 個 DO module per edge）
+    if not ch_rows:
+        slave_m = _re.search(r'-slave(\d+)$', db_device_id)
+        slave_num = int(slave_m.group(1)) if slave_m else 1
+        # 選 prefix：tcs300b03 → DI；tcs300b04 → DO
+        inbox_prefix = "tcs300b04%" if db_device_id.startswith("tcs300b04-") else "tcs300b03%"
+        alt_ids = (await db.execute(text("""
+            SELECT DISTINCT device_id
+            FROM ems_ingest_inbox
+            WHERE edge_id = :edge_id
+              AND device_id LIKE :prefix
+              AND msg_ts > NOW() - INTERVAL '2 hours'
+            ORDER BY device_id
+        """), {"edge_id": edge_id, "prefix": inbox_prefix})).fetchall()
+        if alt_ids:
+            # DI: slave_num maps to sorted list index (slave1→DI1, slave2→DI2, slave3→DI3)
+            # DO: only 1 module per edge → always index 0
+            alt_idx = (slave_num - 1) if not db_device_id.startswith("tcs300b04-") else 0
+            if len(alt_ids) > alt_idx:
+                alt_did = alt_ids[alt_idx][0]
+                ch_rows = (await _query_trx(alt_did)).fetchall()
+                if ch_rows:
+                    log.info("IO status fallback: %s → %s (edge=%s)", db_device_id, alt_did, edge_id)
+
+    # 組裝回傳：channels 格式為 [{channel: int, state: 0|1}]（前端 useRemoteIO 期待）
+    channels: list[dict] | None = None
+    data_source = "pending_ingest"
+    ts_latest: str | None = None
+
+    if ch_rows:
+        ch_map: dict[int, int] = {}
+        for r in ch_rows:
+            # 'di_ch3_state' → 3；'do_ch1_state' → 1
+            m = _re.search(r'_ch(\d+)_state$', r[0])
+            if m:
+                ch_num = int(m.group(1))
+                ch_map[ch_num] = 1 if r[1] else 0
+        if ch_map:
+            channels = [{"channel": ch, "state": ch_map[ch]}
+                        for ch in sorted(ch_map.keys())]
+            data_source = "trx_io_reading"
+            ts_latest = ch_rows[0][2].isoformat() if ch_rows[0][2] else None
+
+    # === DO 裝置：疊加最近 relay.set 命令狀態 ===
+    # trx_reading 在 poll_interval_sec 內落後（v9.6 為 1s；舊版 300s）
+    # relay.set 執行後 Edge < 500ms 確認，Central ems_commands 立即更新
+    # → 用最近 60s 內 SUCCEEDED relay.set payload 覆蓋 trx_reading 舊值
+    if inferred_kind == "tcs300b04_do":
+        relay_rows = (await db.execute(text("""
+            SELECT c.payload_json, c.updated_at
+            FROM ems_commands c
+            WHERE c.device_id = :device_id
+              AND c.command_type = 'relay.set'
+              AND c.status = 'SUCCEEDED'
+              AND c.updated_at > NOW() - INTERVAL '60 seconds'
+            ORDER BY c.updated_at DESC
+            LIMIT 20
+        """), {"device_id": db_device_id})).fetchall()
+
+        if relay_rows:
+            # 最新命令 per channel（payload_json.channel + payload_json.state）
+            cmd_ch: dict[int, int] = {}
+            cmd_ts = relay_rows[0][1]
+            for r in relay_rows:
+                try:
+                    p = r[0] if isinstance(r[0], dict) else {}
+                    ch = int(p.get("channel", 0))
+                    st = 1 if p.get("state") else 0
+                    if ch > 0 and ch not in cmd_ch:  # DESC order → first = newest
+                        cmd_ch[ch] = st
+                except Exception:
+                    pass
+            if cmd_ch:
+                # 疊加：已有 trx 資料時合併；否則從命令建 list
+                if channels:
+                    ch_map = {c["channel"]: c["state"] for c in channels}
+                    ch_map.update(cmd_ch)
+                    channels = [{"channel": ch, "state": ch_map[ch]}
+                                for ch in sorted(ch_map.keys())]
+                else:
+                    channels = [{"channel": ch, "state": st}
+                                for ch, st in sorted(cmd_ch.items())]
+                data_source = "commanded_state"
+                ts_latest = cmd_ts.isoformat() if cmd_ts else ts_latest
 
     return {
         "device_id": device_id,
-        "device_kind": row[1],
-        "edge_id": row[2],
-        "site_code": EDGE_TO_SITE.get(row[2]),
+        "device_kind": inferred_kind,
+        "edge_id": edge_id,
+        "site_code": EDGE_TO_SITE.get(edge_id),
         "display_name": row[3],
-        "channels": None,  # TODO: P10C ingest trx_io_reading 後填 {ch_1: bool, ...}
-        "data_source": "pending_ingest",
-        "ts": None,
-        "note": (
-            "trx_io_reading ingest pipeline 待 P10C 補（M-PM-245 §A 升報 #1）"
-            "；補完後本 endpoint 回真實 DI/DO state."
+        "channels": channels,
+        "data_source": data_source,
+        "ts": ts_latest,
+        "note": None if data_source in ("trx_io_reading", "commanded_state") else (
+            "trx_reading 無最近 15 分鐘資料；確認 RS485 接線與 edge 狀態。"
         ),
     }
 
@@ -256,33 +420,121 @@ async def get_device_channels(
     device_id: str = Path(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """列 device 16 channel + 業務命名（從 vault SSOT join）.
+    """列 device 16 channel + 業務命名 + 業主自訂點位名稱（custom_name）.
 
-    回 channel mapping per device（DI 16 或 DO 16）；業務命名留 admin-ui display layer。
+    回 channel mapping per device（DI 16 或 DO 16）。
+    每 channel 物件：{code, name, category, channel, custom_name}
+    - code/name/category：靜態 circuit 定義（device_circuits.py）
+    - channel：1-16（從 code `_chN` 解出）
+    - custom_name：業主自訂點位名稱（M-PM-293 §B；ems_device_channel_metadata；無則 null）
+    接受 UI 格式（tcs300b03_di- prefix）或 DB 格式（tcs300b03- prefix）。
     """
+    import re as _re
+
+    db_device_id = _normalize_device_id(device_id)
+
     row = (await db.execute(text("""
         SELECT device_id, device_kind, edge_id, display_name
         FROM ems_device
         WHERE device_id = :device_id AND deleted_at IS NULL
-    """), {"device_id": device_id})).fetchone()
+    """), {"device_id": db_device_id})).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"device_id '{device_id}' not found")
-    if row[1] not in IO_DEVICE_KINDS:
-        raise HTTPException(status_code=422,
-                            detail=f"device_id '{device_id}' is not an I/O device (kind={row[1]})")
 
-    circuits = get_circuits(row[1])
+    inferred_kind = _infer_io_kind(db_device_id)
+    if inferred_kind is None or inferred_kind not in IO_DEVICE_KINDS:
+        raise HTTPException(status_code=422,
+                            detail=f"device_id '{device_id}' is not an I/O device")
+
+    circuits = get_circuits(inferred_kind)
     if circuits is None:
         raise HTTPException(status_code=500,
-                            detail=f"device_kind '{row[1]}' has no circuits in DEVICE_MODEL_CIRCUITS")
+                            detail=f"device_kind '{inferred_kind}' has no circuits in DEVICE_MODEL_CIRCUITS")
+
+    # M-PM-293 §B：疊加業主自訂點位名稱（custom_name）
+    cn_rows = (await db.execute(text("""
+        SELECT channel, custom_name
+        FROM ems_device_channel_metadata
+        WHERE device_id = :device_id
+    """), {"device_id": db_device_id})).fetchall()
+    custom_map: dict[int, str] = {r[0]: r[1] for r in cn_rows if r[1] is not None}
+
+    channels_out: list[dict] = []
+    for c in circuits:
+        m = _re.search(r'_ch(\d+)$', c["code"])
+        ch_num = int(m.group(1)) if m else None
+        channels_out.append({
+            **c,
+            "channel": ch_num,
+            "custom_name": custom_map.get(ch_num) if ch_num is not None else None,
+        })
 
     return {
         "device_id": device_id,
-        "device_kind": row[1],
+        "device_kind": inferred_kind,
         "edge_id": row[2],
         "site_code": EDGE_TO_SITE.get(row[2]),
-        "channels": circuits,
-        "channel_count": len(circuits),
+        "channels": channels_out,
+        "channel_count": len(channels_out),
+    }
+
+
+# ============================================================================
+# §2.1.3b: channel custom_name PATCH（M-PM-293 §B；M-P11-E44 升報 ②）
+# ============================================================================
+
+
+class ChannelNameBody(BaseModel):
+    custom_name: str | None = Field(
+        None, max_length=100,
+        description="業主自訂點位名稱（如『負壓風扇1 手動』）；None/空字串 = 清除回預設",
+    )
+
+
+@router.patch("/devices/{device_id}/channels/{channel}")
+async def patch_channel_name(
+    device_id: str = Path(...),
+    channel: int = Path(..., ge=1, le=16),
+    body: ChannelNameBody = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """更新 device 某 channel 的業主自訂點位名稱（M-PM-293 §B）.
+
+    UPSERT ems_device_channel_metadata；custom_name 空/None → 清除（存 NULL；
+    前端 fallback 預設名）。接受 UI 格式（tcs300b03_di- prefix）或 DB 格式（tcs300b03-）。
+
+    取代原本 admin-ui 點位名稱存 browser localStorage 的做法 → Boss 可透過 API 查詢。
+    """
+    db_device_id = _normalize_device_id(device_id)
+
+    row = (await db.execute(text("""
+        SELECT device_id FROM ems_device
+        WHERE device_id = :device_id AND deleted_at IS NULL
+    """), {"device_id": db_device_id})).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"device_id '{device_id}' not found")
+
+    inferred_kind = _infer_io_kind(db_device_id)
+    if inferred_kind is None or inferred_kind not in IO_DEVICE_KINDS:
+        raise HTTPException(status_code=422,
+                            detail=f"device_id '{device_id}' is not an I/O device")
+
+    # 空字串 → 清除（存 NULL）
+    new_name = (body.custom_name or "").strip() or None
+
+    await db.execute(text("""
+        INSERT INTO ems_device_channel_metadata (device_id, channel, custom_name, updated_at)
+        VALUES (:device_id, :channel, :custom_name, NOW())
+        ON CONFLICT (device_id, channel)
+        DO UPDATE SET custom_name = EXCLUDED.custom_name, updated_at = NOW()
+    """), {"device_id": db_device_id, "channel": channel, "custom_name": new_name})
+    await db.commit()
+
+    return {
+        "device_id": device_id,
+        "channel": channel,
+        "custom_name": new_name,
+        "message": "channel custom_name updated" if new_name else "channel custom_name cleared",
     }
 
 
@@ -304,6 +556,7 @@ async def control_do(
     channel: int = Path(..., ge=1, le=16),
     body: ControlBody = Body(...),
     db: AsyncSession = Depends(get_db),
+    me: dict = Depends(get_current_admin),
 ):
     """DO ON/OFF 控制（含 3 Guard；派 ems_commands command_type='io.do.set'）.
 
@@ -320,16 +573,26 @@ async def control_do(
 
     成功則派 ems_commands command_type='io.do.set'；Edge worker pull 後執行 driver.write_do.
     """
-    # === 採證 device ===
+    # === I/O 控制權檢查（can_control_io 旗標，老王 2026-06-17 後端安全鎖，真正 enforce 點）===
+    # 不論 admin/viewer，唯有 can_control_io=TRUE 可下 relay 實體控制。method 閘已對 control_do
+    # path 放行 viewer 進入（dependencies._is_io_control_request），真正把關在此：admin 無旗標 /
+    # viewer 無旗標 一律 403；viewer+旗標（現場操作員）放行。前端按鈕隱藏只是防呆，這裡才是安全邊界。
+    if not me.get("can_control_io"):
+        raise HTTPException(status_code=403, detail="無 I/O 控制權限（需 can_control_io）")
+
+    # === 採證 device（normalize UI device_id prefix → DB device_id）===
+    db_device_id = _normalize_device_id(device_id)
+
     row = (await db.execute(text("""
         SELECT device_id, device_kind, edge_id, display_name
         FROM ems_device
         WHERE device_id = :device_id AND deleted_at IS NULL
-    """), {"device_id": device_id})).fetchone()
+    """), {"device_id": db_device_id})).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail={"error": "device_not_found",
                                                      "message": f"device_id '{device_id}'"})
-    device_kind = row[1]
+    # Infer IO kind from device_id prefix (DB stores 'modbus_meter' for all Modbus devices)
+    device_kind = _infer_io_kind(db_device_id) or row[1]
     edge_id = row[2]
 
     # === Guard 3: channel 接線 + device 必為 DO 模組 ===
@@ -367,7 +630,7 @@ async def control_do(
         "relay_id": relay_id,
         "target_state": target_state,
         # audit trail（edge handler 不用；Central log 用）
-        "device_id": device_id,
+        "device_id": db_device_id,  # DB-form ID (tcs300b04-...) for edge dispatch
         "channel": channel,
         "state": body.state,
         "ssot_ref": "vault §4.5.2 DO write FC06 mask",
@@ -375,13 +638,17 @@ async def control_do(
     command_id = await command_service.create_command(
         db=db,
         edge_id=edge_id,
-        device_id=device_id,
+        device_id=db_device_id,  # DB-form ID for FK in ems_commands
         command_type="relay.set",
         payload=payload,
         priority=8,  # 業主控制動作 high priority
         idempotency_key=None,
         issued_by=body.actor,
     )
+
+    # === MQTT wake-up：通知 Edge 立即拉取命令（<2s dispatch 要求）===
+    # non-fatal：失敗不影響主流程，Edge 最慢在下一輪 30s polling 時執行
+    send_wakeup(edge_id)
 
     return {
         "success": True,
@@ -392,10 +659,7 @@ async def control_do(
         "guards": guards_status,
         "edge_id": edge_id,
         "site_code": EDGE_TO_SITE.get(edge_id),
-        "note": (
-            "command queued; Edge worker pull 後執行 driver.write_do。"
-            "⚠️ Edge RelayController 目前 MOCK；M-PM-245 §A 升報 #2；P10C/P13 補實體後生效。"
-        ),
+        "note": "command queued; MQTT wake-up sent; Edge relay.set 收到後執行 FC06 write。",
     }
 
 
@@ -413,8 +677,12 @@ async def list_active_alarms(
 
     複用 ems_alert_active；不新建 trx_io_alarm（schema 已含 acked_at/by/note）。
     """
-    where = ["a.status = 'active'", "d.device_kind = ANY(:io_kinds)", "d.deleted_at IS NULL"]
-    params: dict[str, Any] = {"io_kinds": list(IO_DEVICE_KINDS)}
+    where = [
+        "a.status = 'active'",
+        "(d.device_id LIKE 'tcs300b03-%' OR d.device_id LIKE 'tcs300b04-%')",
+        "d.deleted_at IS NULL",
+    ]
+    params: dict[str, Any] = {}
     if site_code:
         site = get_site(site_code)
         if site is None:
@@ -473,8 +741,11 @@ async def list_alarm_history(
     db: AsyncSession = Depends(get_db),
 ):
     """歷史 alarm（含 resolved / acknowledged events from ems_alert_history）."""
-    where = ["d.device_kind = ANY(:io_kinds)", "d.deleted_at IS NULL"]
-    params: dict[str, Any] = {"io_kinds": list(IO_DEVICE_KINDS), "limit": limit}
+    where = [
+        "(d.device_id LIKE 'tcs300b03-%' OR d.device_id LIKE 'tcs300b04-%')",
+        "d.deleted_at IS NULL",
+    ]
+    params: dict[str, Any] = {"limit": limit}
     if site_code:
         site = get_site(site_code)
         if site is None:

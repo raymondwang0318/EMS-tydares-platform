@@ -24,7 +24,8 @@ async def ingest(
     if body.edge_id != edge.edge_id:
         raise HTTPException(status_code=403, detail="edge_id mismatch with token")
     accepted, duplicated = await ingest_service.store_records(
-        db, edge_id=edge.edge_id, device_id=device_id, records=body.records
+        db, edge_id=edge.edge_id, device_id=device_id, records=body.records,
+        channel=body.channel,
     )
     return IngestResponse(status="accepted", accepted=accepted, duplicated=duplicated)
 
@@ -44,6 +45,7 @@ async def ingest_thermal(
         if not rec.source_type:
             rec.source_type = "ir"
     accepted, duplicated = await ingest_service.store_records(
-        db, edge_id=edge.edge_id, device_id=device_id, records=body.records
+        db, edge_id=edge.edge_id, device_id=device_id, records=body.records,
+        channel=body.channel,
     )
     return IngestResponse(status="accepted", accepted=accepted, duplicated=duplicated)

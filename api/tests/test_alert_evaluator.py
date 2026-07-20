@@ -80,10 +80,9 @@ def test_in_memory_state_keys_per_rule_per_target():
     assert (2, "811c_a") in ae._condition_first_met_at
 
 
-def test_default_edge_id_constant_matches_phase_assumption():
-    """Phase α/β 暴力假設：所有 811c_* 屬 TYDARES-E66（DR-028-05）。"""
-    # 變動需配合 ADR-028 + 多 Edge 模板化新版本
-    assert ae.DEFAULT_EDGE_ID == "TYDARES-E66"
+def test_default_edge_id_fallback_removed():
+    """M-P12-109：E66 fallback 已斷根（metadata.edge_id 全 fleet 補值後移除）。"""
+    assert not hasattr(ae, "DEFAULT_EDGE_ID")
 
 
 def test_alert_tick_sec_within_design_range():

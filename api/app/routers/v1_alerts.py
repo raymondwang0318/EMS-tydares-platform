@@ -30,12 +30,40 @@ router = APIRouter(
     dependencies=[Depends(verify_admin_token)],
 )
 
+# M-PM-323v2：history PK 的 ts 以 epoch-microsecond 整數對前端交換，避免 JS Date
+# （millisecond 精度）round-trip 截斷 µs 導致 PK 不匹配、人工已讀確認靜默失效。
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _ts_to_us(dt: datetime | None) -> int | None:
+    """timestamptz → epoch microseconds（純整數運算，零浮點精度損失）。"""
+    if dt is None:
+        return None
+    delta = dt - _EPOCH
+    return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+
 
 # ===== Pydantic =====
 
 class AckRequest(BaseModel):
     acked_by: str = Field(..., min_length=1, max_length=100, description="操作者 (必填)")
     ack_note: Optional[str] = Field(None, max_length=500, description="備註 (選填)")
+
+
+class ClearRequest(BaseModel):
+    cleared_by: str = Field(..., min_length=1, max_length=100, description="解除操作者 (必填)")
+    note: Optional[str] = Field(None, max_length=500, description="備註 (選填)")
+
+
+class HistoryReadItem(BaseModel):
+    ts_us: int = Field(..., description="history 列 ts 的 epoch microseconds（GET /history 回傳的 ts_us 原樣傳回）")
+    alert_id: int = Field(..., description="history 列 alert_id")
+    event_type: str = Field(..., description="history 列 event_type")
+
+
+class HistoryReadRequest(BaseModel):
+    read_by: str = Field(..., min_length=1, max_length=100, description="讀取確認操作者 (必填)")
+    items: list[HistoryReadItem] = Field(..., description="要標記已讀的 history 列（PK 三元組）；1~500 筆")
 
 
 # ===== GET /v1/alerts/active =====
@@ -49,7 +77,10 @@ async def list_active_alerts(
 ):
     """當前 active alerts；可 filter device_id / edge_id / severity.
 
-    Excludes auto_resolved=TRUE (軟體類已自動解除).
+    M-PM-323v2（老王 2026-06-17）：硬體告警恢復改 grace 後自動 DELETE（不再有 auto_resolved=
+    TRUE 綠燈停留 row），故僅回傳當前真實異常（auto_resolved=FALSE）。auto_resolved/
+    auto_resolved_at 欄位保留回傳（向後相容，恆 FALSE/NULL）。「已恢復」回顧改至
+    GET /history（event_type=auto_resolved）+ 歷史頁人工讀取確認（POST /history/read）。
     JOIN ems_alert_rule for rule_name / category / scope。
     """
     if severity is not None and severity not in ("critical", "warning", "info"):
@@ -101,6 +132,8 @@ async def list_active_alerts(
             "acked_by": r["acked_by"],
             "acked_at": r["acked_at"].isoformat() if r["acked_at"] else None,
             "ack_note": r["ack_note"],
+            "auto_resolved": r["auto_resolved"],
+            "auto_resolved_at": r["auto_resolved_at"].isoformat() if r["auto_resolved_at"] else None,
         }
         for r in rows
     ]
@@ -156,7 +189,7 @@ async def list_alert_history(
         SELECT
             ts, alert_id, rule_id, event_type,
             device_id, edge_id, value, message,
-            severity, actor, note
+            severity, actor, note, read_at, read_by
         FROM ems_alert_history
         WHERE ts >= :since AND ts <= :until
     """
@@ -180,6 +213,7 @@ async def list_alert_history(
     return [
         {
             "ts": r["ts"].isoformat() if r["ts"] else None,
+            "ts_us": _ts_to_us(r["ts"]),
             "alert_id": r["alert_id"],
             "rule_id": r["rule_id"],
             "event_type": r["event_type"],
@@ -190,6 +224,8 @@ async def list_alert_history(
             "severity": r["severity"],
             "actor": r["actor"],
             "note": r["note"],
+            "read_at": r["read_at"].isoformat() if r["read_at"] else None,
+            "read_by": r["read_by"],
         }
         for r in rows
     ]
@@ -272,3 +308,96 @@ async def acknowledge_alert(
         "ack_note": body.ack_note,
         "message": "acknowledged",
     }
+
+
+# ===== POST /v1/alerts/{alert_id}/clear（M-PM-323 軌 C）=====
+
+@router.post("/{alert_id}/clear")
+async def clear_alert(
+    alert_id: int = Path(..., ge=1),
+    body: ClearRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """手動解除告警；DELETE active row + history 'cleared' 留人留痕.
+
+    因 ems_alert_active.status CHECK 只允許 ('active','acknowledged') 無終態值，
+    「解除」語意 = DELETE 整列。M-PM-323v2 後 active 僅存真實異常紅燈（硬體恢復已由
+    evaluator grace 後自動 DELETE，不再有 auto_resolved=TRUE 綠燈停留 row）；此端點為人工
+    「提前/強制」解除紅燈（如 TC04 送原廠決定 clear），與 evaluator 自動 DELETE 互補。
+    """
+    row = (await db.execute(text("""
+        SELECT rule_id, device_id, edge_id, severity
+        FROM ems_alert_active WHERE alert_id = :alert_id
+    """), {"alert_id": alert_id})).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail=f"alert_id {alert_id} not found in ems_alert_active")
+    rule_id, device_id, edge_id, severity = row
+
+    await db.execute(text("""
+        INSERT INTO ems_alert_history
+            (ts, alert_id, rule_id, event_type, device_id, edge_id, severity, actor, note)
+        VALUES
+            (NOW(), :alert_id, :rule_id, 'cleared', :device_id, :edge_id,
+             :severity, :actor, :note)
+    """), {
+        "alert_id": alert_id, "rule_id": rule_id,
+        "device_id": device_id, "edge_id": edge_id, "severity": severity,
+        "actor": body.cleared_by, "note": body.note,
+    })
+    await db.execute(
+        text("DELETE FROM ems_alert_active WHERE alert_id = :alert_id"),
+        {"alert_id": alert_id})
+    await db.commit()
+    return {"alert_id": alert_id, "status": "cleared",
+            "cleared_by": body.cleared_by, "message": "cleared"}
+
+
+# ===== POST /v1/alerts/history/read（M-PM-323v2 人工讀取確認）=====
+
+@router.post("/history/read")
+async def mark_history_read(
+    body: HistoryReadRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """人工讀取確認：批次標 ems_alert_history 列 read_at/read_by（M-PM-323v2 軌C v2）.
+
+    硬體告警恢復後 active 已 grace 後自動 DELETE，治理留痕改在歷史頁——人回顧 history 後
+    對指定列按『已讀確認』。定位鍵＝(ts_us, alert_id, event_type)，ts_us 為該列 ts 的
+    epoch microseconds（GET /history 回傳的 ts_us 原樣傳回）。用整數 ts_us 而非 ISO 字串，
+    杜絕前端 JS Date（millisecond 精度）round-trip 截斷微秒導致 PK 不匹配、確認靜默失效；
+    後端以 (TIMESTAMPTZ 'epoch' + ts_us µs) 純整數還原 timestamptz，命中 PK index。
+    冪等：read_at IS NULL 才更新（已讀不覆蓋首次確認人/時間）。回 marked=實際標記筆數 /
+    already_or_missing=未命中數（已讀或 PK 不存在）/ unmatched=未命中明細供前端稽核。
+    """
+    if not body.items:
+        raise HTTPException(status_code=422, detail="items must not be empty")
+    if len(body.items) > 500:
+        raise HTTPException(status_code=422, detail="items exceeds max 500 per request")
+    for ev in body.items:
+        if ev.event_type not in VALID_EVENT_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"event_type must be one of: {', '.join(VALID_EVENT_TYPES)}")
+
+    marked = 0
+    unmatched: list[dict] = []
+    for ev in body.items:
+        res = await db.execute(text("""
+            UPDATE ems_alert_history
+            SET read_at = NOW(), read_by = :read_by
+            WHERE ts = (TIMESTAMPTZ 'epoch' + (:ts_us * INTERVAL '1 microsecond'))
+              AND alert_id = :alert_id AND event_type = :event_type
+              AND read_at IS NULL
+        """), {
+            "read_by": body.read_by,
+            "ts_us": ev.ts_us, "alert_id": ev.alert_id, "event_type": ev.event_type,
+        })
+        n = res.rowcount or 0
+        marked += n
+        if n == 0:
+            unmatched.append({"ts_us": ev.ts_us, "alert_id": ev.alert_id,
+                              "event_type": ev.event_type})
+    await db.commit()
+    return {"marked": marked, "already_or_missing": len(unmatched),
+            "requested": len(body.items), "unmatched": unmatched, "read_by": body.read_by}

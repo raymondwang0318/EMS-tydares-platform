@@ -36,7 +36,11 @@ from app.constants.device_circuits import (
     get_circuits,
     map_circuit_to_energy_param,
     map_circuit_to_power_param,
+    map_circuit_to_voltage_ll_param,
     map_circuit_to_voltage_param,
+    map_circuit_to_wire_param,
+    wire_value_means_ll_only,
+    wire_value_name,
 )
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(verify_admin_token)])
@@ -1150,16 +1154,41 @@ async def ecsu_realtime(
             total_kw += b.sign * value_kw
             active += 1
 
-        # 電壓取值（判斷電表存活參考）— 比照 power，取該 binding 對應電表 v_avg 最新值
+        # 電壓取值（判斷電表存活參考）— M-PM-315 接線模式感知（老王 2026-06-10）：
+        # 電表 sys_wire 設定採證欄已全 driver 輪詢上報 → 依「實際接線模式」決定電壓取
+        # L-N（相）或 L-L（線）：3P3W 系（無中性線）相電壓物理上=0 非故障，取 L-L。
+        # sys_wire 缺值時退回 zero-fallback（L-N>0 用 L-N，否則 L-L）。
+        # 窗 10 分鐘：cpm23/aem_drb 輪詢 300s，5 分鐘窗會漏拍。
         vparam = map_circuit_to_voltage_param(b.circuit_code, b.device_id)
-        vlatest = (await db.execute(text("""
-            SELECT value FROM trx_reading
+        llparam = map_circuit_to_voltage_ll_param(b.circuit_code, b.device_id)
+        wparam = map_circuit_to_wire_param(b.circuit_code, b.device_id)
+        params_in = tuple({p for p in (vparam, llparam, wparam) if p})
+        vrows = (await db.execute(text("""
+            SELECT DISTINCT ON (parameter_code) parameter_code, value
+            FROM trx_reading
             WHERE device_id = :device_id
-              AND parameter_code = :param_code
-              AND ts > NOW() - INTERVAL '5 minutes'
-            ORDER BY ts DESC LIMIT 1
-        """), {"device_id": b.device_id, "param_code": vparam})).fetchone()
-        v_val = float(vlatest[0]) if vlatest is not None and vlatest[0] is not None else None
+              AND parameter_code = ANY(:params)
+              AND ts > NOW() - INTERVAL '10 minutes'
+            ORDER BY parameter_code, ts DESC
+        """), {"device_id": b.device_id, "params": list(params_in)})).fetchall()
+        vmap = {r[0]: float(r[1]) for r in vrows if r[1] is not None}
+        v_ln = vmap.get(vparam)
+        v_ll = vmap.get(llparam)
+        wire_raw = vmap.get(wparam) if wparam else None
+        wire_val = int(wire_raw) if wire_raw is not None else None
+        wire_ll = wire_val is not None and wire_value_means_ll_only(b.device_id, wire_val)
+
+        def _src(p: str) -> str:
+            return "L-L" if ("ll" in p or "_u_avg" in p) else "L-N"
+
+        if wire_ll and v_ll is not None:
+            v_val, v_src = v_ll, _src(llparam)          # 接線感知：3P3W 系 → 線電壓
+        elif v_ln is not None and v_ln > 0:
+            v_val, v_src = v_ln, _src(vparam)           # 型號預設電壓參數
+        elif v_ll is not None and v_ll > 0:
+            v_val, v_src = v_ll, _src(llparam)          # zero-fallback（sys_wire 未到時）
+        else:
+            v_val, v_src = v_ln, (_src(vparam) if v_ln is not None else None)
         if v_val is not None:
             voltages.append(v_val)
 
@@ -1171,6 +1200,9 @@ async def ecsu_realtime(
             "sign": b.sign,
             "value_kw": value_kw,
             "voltage": v_val,
+            "voltage_source": v_src,  # 'L-N' 相電壓 / 'L-L' 線電壓
+            "sys_wire": wire_val,     # 電表自報接線模式原始值（設定採證）
+            "wire_mode": wire_value_name(b.device_id, wire_val) if wire_val is not None else None,
         })
 
     result = {
@@ -1474,11 +1506,12 @@ async def list_ir_devices(db: AsyncSession = Depends(get_db)):
           m.display_name,
           m.ip_address,
           MAX(t.ts) AS last_seen,
-          m.archived_at
+          m.archived_at,
+          m.edge_id
         FROM trx_reading t
         LEFT JOIN ems_ir_device_metadata m ON m.device_id = t.device_id
         WHERE t.device_id LIKE '811c_%'
-        GROUP BY t.device_id, m.display_name, m.ip_address, m.archived_at
+        GROUP BY t.device_id, m.display_name, m.ip_address, m.archived_at, m.edge_id
         HAVING m.archived_at IS NULL OR MAX(t.ts) > m.archived_at
         ORDER BY t.device_id
     """))
@@ -1488,6 +1521,8 @@ async def list_ir_devices(db: AsyncSession = Depends(get_db)):
             "display_name": row[1],
             "ip_address": row[2],
             "last_seen": row[3].isoformat() if row[3] else None,
+            # M-P12-109：edge_id 補值後透傳（M-PM-111 Phase 2 遺欠；E66 fallback 斷根配套）
+            "edge_id": row[5],
         }
         for row in result.fetchall()
     ]

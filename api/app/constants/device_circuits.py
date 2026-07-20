@@ -218,6 +218,64 @@ def map_circuit_to_voltage_param(circuit_code: str, device_id: str) -> str:
     return "voltage_avg"  # fallback
 
 
+# ============================================================================
+# M-PM-315 接線模式感知（老王 2026-06-10）：sys_wire 設定採證欄已入全 driver 輪詢，
+# 依電表「實際接線模式」決定電壓取 L-N（相）或 L-L（線）。
+# ⚠️ 三型號 wire 值意義各異（依各自手冊），勿混用：
+#   cpm12d TC-V13: 0=1P2W 1=1P3W 2=3P3W1CT 3=3P3W2CT 4=3P3W3CT 5=3P4W1CT 6=3P4W3CT
+#   cpm23  V1.3 : 0=1P2W 1=1P3W 2=2P3W   3=3P3W    4=3P3W.3  5=3P4W    6=3P4W.B
+#   aem_drb V18 : 0=1P2W 1=1P3W 2=3P3W2CT 3=3P4W3CT 4=3P3W3CT 5=3P4W1CT 6=3P3W1CT
+# ============================================================================
+
+# 「無中性線（L-N 物理上=0，只有 L-L 有值）」的 wire 值集合（per 型號）
+WIRE_LL_ONLY_BY_KIND: dict[str, set[int]] = {
+    "cpm12d": {2, 3, 4},
+    "cpm23": {2, 3, 4},
+    "aem_drb": {2, 4, 6},
+}
+
+# wire 值 → 可讀名稱（per 型號；稽核/顯示用）
+WIRE_TYPE_NAMES_BY_KIND: dict[str, dict[int, str]] = {
+    "cpm12d": {0: "1P2W", 1: "1P3W", 2: "3P3W1CT", 3: "3P3W2CT", 4: "3P3W3CT", 5: "3P4W1CT", 6: "3P4W3CT"},
+    "cpm23": {0: "1P2W", 1: "1P3W", 2: "2P3W", 3: "3P3W", 4: "3P3W.3", 5: "3P4W", 6: "3P4W.B"},
+    "aem_drb": {0: "1P2W", 1: "1P3W", 2: "3P3W2CT", 3: "3P4W3CT", 4: "3P3W3CT", 5: "3P4W1CT", 6: "3P3W1CT"},
+}
+
+
+def map_circuit_to_wire_param(circuit_code: str, device_id: str) -> str | None:
+    """接線模式 sys_wire 的 parameter_code（電壓判讀用；branch 繼承 main 的 PT/wire）。"""
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind in ("cpm12d", "cpm23"):
+        return "sys_wire"
+    if kind == "aem_drb":
+        main = _aem_branch_to_main(cc.split("-")[0] if "-" in cc else cc)
+        return f"{main}_sys_wire"
+    return None
+
+
+def map_circuit_to_voltage_ll_param(circuit_code: str, device_id: str) -> str:
+    """線電壓 (L-L) 平均的 parameter_code（3P3W 接線時的電壓來源）。"""
+    kind = _parse_device_kind(device_id)
+    cc = (circuit_code or "").lower()
+    if kind == "aem_drb":
+        main = _aem_branch_to_main(cc.split("-")[0] if "-" in cc else cc)
+        return f"{main}_u_avg"
+    return "voltage_ll_avg"  # cpm12d / cpm23 / fallback
+
+
+def wire_value_means_ll_only(device_id: str, wire_value: int) -> bool:
+    """該型號該 wire 值是否=無中性線（電壓應取 L-L）。"""
+    kind = _parse_device_kind(device_id)
+    return wire_value in WIRE_LL_ONLY_BY_KIND.get(kind, set())
+
+
+def wire_value_name(device_id: str, wire_value: int) -> str | None:
+    """wire 值的可讀名稱（per 型號）。"""
+    kind = _parse_device_kind(device_id)
+    return WIRE_TYPE_NAMES_BY_KIND.get(kind, {}).get(wire_value)
+
+
 def map_circuit_to_frequency_param(circuit_code: str, device_id: str) -> str:
     """ECSU 平均頻率聚合用 parameter_code.
 

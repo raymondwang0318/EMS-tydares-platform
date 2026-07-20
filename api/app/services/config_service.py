@@ -51,7 +51,7 @@ async def build_desired_config(db: AsyncSession, edge_id: str) -> dict:
             "deleted": False,
         }
 
-        if d.device_kind == "modbus_meter":
+        if d.device_kind in ("modbus_meter", "tcs300b03_di", "tcs300b04_do"):
             mb_result = await db.execute(
                 select(EmsDeviceModbus).where(EmsDeviceModbus.device_id == d.device_id)
             )
