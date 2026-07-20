@@ -1,0 +1,5 @@
+# 開發/測試專用（生產 image 不裝）— A4 2026-07-20；版本依據：開發機實測
+-r requirements.txt
+pytest==9.0.2
+pytest-asyncio==1.3.0
+httpx==0.28.1
