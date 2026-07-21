@@ -48,6 +48,18 @@ PARAMS = [
     "mb_sys_wire", "mb_pt_primary", "mb_pt_secondary", "mb_v_avg", "mb_u_avg",
 ]
 
+# R3 已確認排除清單（device 級，ma/mb 皆免）——案場現場知識，模板複製到新案場時清空。
+# 老王 2026-07-21 確認：這 5 顆 AEM 的 600V 檔＝出廠預設值沿用，實體無 PT（1:1 直讀），
+# 設定值不影響量測，直接沿用無需校正。R3 規則本身保留（安全網場景＝實體掛 PT 但表
+# 誤設直讀→量測真錯；與本案數據同形，區分靠現場確認，故採此排除制）。
+R3_ACK_DEVICES = {
+    "aem_drb-TYDARES-E04-slave30",
+    "aem_drb-TYDARES-E04-slave40",
+    "aem_drb-TYDARES-E18-slave70",
+    "aem_drb-TYDARES-E21-slave90",
+    "aem_drb-TYDARES-E23-slave120",
+}
+
 _LATEST_SQL = """
 SELECT DISTINCT ON (device_id, parameter_code) device_id, parameter_code, value
 FROM trx_reading
@@ -96,7 +108,8 @@ def _evaluate_unit(unit: str, wire, pri, sec, v: float | None) -> list[dict]:
                     f"現設 {sec:.0f}V，請核對 PT 銘牌（若銘牌為 110 則量測有 {abs(sec-110)/110*100:.0f}% 系統性偏差）"),
             "detail": {"pt_primary": pri, "pt_secondary": sec},
         })
-    if sec and abs(pri - sec) < 0.5 and abs(v - pri) / pri * 100.0 > R3_DEV_PCT:
+    if (sec and abs(pri - sec) < 0.5 and abs(v - pri) / pri * 100.0 > R3_DEV_PCT
+            and unit.split("/")[0] not in R3_ACK_DEVICES):
         hits.append({
             "rule": "rated_mismatch", "severity": "info",
             "msg": (f"📋 {unit} 額定檔位申報 {pri:.0f}V 與實測 {v:.0f}V 不符（直讀表不影響量測，"
