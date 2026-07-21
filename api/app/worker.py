@@ -346,6 +346,13 @@ async def main():
     ingest_digest_task = asyncio.create_task(ingest_digest_watcher_loop(session_factory))
     log.info("ingest_digest_watcher launched (M-PM-345 §六 OBSERVE-ONLY)")
 
+    # PT/CT 設定合理性看門狗（A6-②，老王 2026-07-21 拍板）：實測電壓 vs 額定申報，
+    # 異常開 ems_events（source='pt_sanity_watcher'）。觀察期 notify_pananora=FALSE
+    # 只記不發信；mail_worker 撿單條件=notify_pananora=TRUE，結構性隔離。
+    from app.pt_sanity_watcher import pt_sanity_watcher_loop
+    pt_sanity_task = asyncio.create_task(pt_sanity_watcher_loop(session_factory))
+    log.info("pt_sanity_watcher launched (A6-② 觀察期不發信)")
+
     try:
         while True:
             try:
@@ -375,7 +382,7 @@ async def main():
                 log.exception("main ingest loop tick failed; retrying")
                 await asyncio.sleep(POLL_INTERVAL_SEC)
     finally:
-        for _t in (alert_task, io_anomaly_task, edge_hb_task, alarm_eval_task, mail_task, ingest_digest_task):
+        for _t in (alert_task, io_anomaly_task, edge_hb_task, alarm_eval_task, mail_task, ingest_digest_task, pt_sanity_task):
             _t.cancel()
             try:
                 await _t
