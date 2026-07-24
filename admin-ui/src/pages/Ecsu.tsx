@@ -121,8 +121,14 @@ export default function Ecsu() {
     } finally {
       setSummaryLoading(false);
     }
-    // 對齊 UI 順序：M-PM-231 純 ecsu_id ASC sort（buildEcsuTree 兌現；本卷 Excel 同步）
-    const sortedRows = [...rows].sort((a, b) => a.ecsu_id - b.ecsu_id);
+    // 匯出順序＝KW-* 自然排序（老王 2026-07-24；KW-2 < KW-10 數字排非字串排；非 KW 碼排最後按 id）
+    const kwNum = (code: string | null | undefined) => {
+      const m = /^KW-(\d+)/i.exec(code ?? '');
+      return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+    };
+    const sortedRows = [...rows].sort(
+      (a, b) => kwNum(a.ecsu_code) - kwNum(b.ecsu_code) || a.ecsu_id - b.ecsu_id,
+    );
     const enriched: ExportRow[] = sortedRows.map((r) => {
       const s = summary.get(r.ecsu_id);
       const c = queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', r.ecsu_id]);
