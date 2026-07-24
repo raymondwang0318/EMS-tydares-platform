@@ -38,6 +38,7 @@ import {
 } from '../hooks/useEcsu';
 import { useReportExport, type ExportColumn } from '../hooks/useReportExport';
 import { isEmbedded } from '../lib/embed';
+import api from '../services/api';
 
 const { Title, Text } = Typography;
 
@@ -91,7 +92,7 @@ export default function Ecsu() {
   // - 重用 useReportExport hook (M-PM-173 既建 SheetJS pattern)
   // - 即時 kW / 本月 kWh / 綁定數 從 react-query cache 取（per-row cells 已 mount fetch）；無額外 API call
   // - tree flatten：用 useEcsuList 的 flat rows（非 treeData）；含全部父子節點同一層
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (!rows || rows.length === 0) {
       message.warning('無資料可匯出');
       return;
@@ -102,18 +103,37 @@ export default function Ecsu() {
       _realtime_kw: number | null;
       _monthly_kwh: number | null;
     }
+    // 全量即時總表（老王 2026-07-24：原本只讀 react-query cache → 沒看過的列全「—」，
+    // 第 39 筆起空白案）：匯出前打 /ecsu/realtime-summary 一次撈全 93 顆；失敗退回 cache。
+    interface SummaryItem {
+      ecsu_id: number; realtime_kw: number; voltage_max: number | null;
+      total_bindings: number; monthly_kwh: number;
+    }
+    setSummaryLoading(true);
+    let summary = new Map<number, SummaryItem>();
+    try {
+      const { data } = await api.get<{ items: SummaryItem[] }>(
+        '/admin/ecsu/realtime-summary', { timeout: 60_000 },
+      );
+      summary = new Map(data.items.map((it) => [it.ecsu_id, it]));
+    } catch {
+      message.warning('全量數據載入失敗，改用畫面快取（未瀏覽的列可能為「—」）');
+    } finally {
+      setSummaryLoading(false);
+    }
     // 對齊 UI 順序：M-PM-231 純 ecsu_id ASC sort（buildEcsuTree 兌現；本卷 Excel 同步）
     const sortedRows = [...rows].sort((a, b) => a.ecsu_id - b.ecsu_id);
     const enriched: ExportRow[] = sortedRows.map((r) => {
+      const s = summary.get(r.ecsu_id);
       const c = queryClient.getQueryData<EcsuCircuitsResp>(['ecsu', 'circuits', r.ecsu_id]);
       const rt = queryClient.getQueryData<EcsuRealtimeResp>(['ecsu', 'realtime', r.ecsu_id]);
       const mo = queryClient.getQueryData<EcsuMonthlyResp>(['ecsu', 'monthly', r.ecsu_id]);
       return {
         ...r,
-        _circuits_count: c?.count ?? null,
-        _voltage_max: rt?.voltage_max ?? null,
-        _realtime_kw: rt?.realtime_kw ?? null,
-        _monthly_kwh: mo?.monthly_kwh ?? null,
+        _circuits_count: s?.total_bindings ?? c?.count ?? null,
+        _voltage_max: s ? s.voltage_max : (rt?.voltage_max ?? null),
+        _realtime_kw: s?.realtime_kw ?? rt?.realtime_kw ?? null,
+        _monthly_kwh: s?.monthly_kwh ?? mo?.monthly_kwh ?? null,
       };
     });
     const columns: ExportColumn<ExportRow>[] = [
@@ -156,6 +176,8 @@ export default function Ecsu() {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<EcsuRow | null>(null);
+  // 匯出前全量數據載入中（老王 2026-07-24）
+  const [summaryLoading, setSummaryLoading] = useState(false);
   const [form] = Form.useForm<EcsuFormBody>();
 
   // M-PM-272 §A: 3 欄純前端排序（代碼 / 區域 / 綁定數）— 老王 5/26 拍板純前端 sort
@@ -426,10 +448,10 @@ export default function Ecsu() {
         <Button
           icon={<FileExcelOutlined />}
           onClick={handleExportExcel}
-          loading={isExporting}
+          loading={isExporting || summaryLoading}
           disabled={!rows || rows.length === 0}
         >
-          匯出 Excel
+          {summaryLoading ? '載入全量數據…' : '匯出 Excel'}
         </Button>
         {!isEmbedded && (
           <Text type="secondary" style={{ fontSize: 12 }}>
