@@ -123,6 +123,35 @@ async def list_edges(db: AsyncSession = Depends(get_db)):
     ]
 
 
+@router.get("/edges/{edge_id}/cpu-temp-history")
+async def edge_cpu_temp_history(
+    edge_id: str,
+    hours: int = Query(24, ge=1, le=744),
+    db: AsyncSession = Depends(get_db),
+):
+    """edge CPU 溫度履歷（老王 2026-07-09：後台 Edge 管理頁「溫度履歷」查詢）。
+
+    來源 ems_edge_heartbeat.payload_json.cpu_temp_c（edge_host_monitor 每 60s 上報）。
+    bucket 隨範圍自適應（≤24h→10min、≤72h→30min、>72h→1h），回台北時間字串（呈現一律 +8）。
+    唯讀查詢，不動任何狀態。
+    """
+    bucket_min = 10 if hours <= 24 else (30 if hours <= 72 else 60)
+    rows = (await db.execute(text("""
+        SELECT to_char(
+                 to_timestamp(floor(extract(epoch FROM hb_ts) / (:bm * 60)) * (:bm * 60))
+                   + interval '8 hours',
+                 'MM-DD HH24:MI') AS t,
+               round(avg((payload_json->>'cpu_temp_c')::numeric), 1) AS avg_c,
+               round(max((payload_json->>'cpu_temp_c')::numeric), 1) AS max_c
+        FROM ems_edge_heartbeat
+        WHERE edge_id = :eid
+          AND hb_ts > now() - make_interval(hours => :h)
+          AND payload_json ? 'cpu_temp_c'
+        GROUP BY 1 ORDER BY 1
+    """), {"eid": edge_id, "h": hours, "bm": bucket_min})).fetchall()
+    return [{"t": r[0], "avg_c": float(r[1]), "max_c": float(r[2])} for r in rows]
+
+
 # M-PM-166 fix: 補 PUT /edges/{edge_id} edit hostname / edge_name / site_code 等
 # 對齊 M-PM-151 PUT/PATCH 雙 decorator pattern (admin-ui frontend 用 PUT method)
 # 既有 PATCH 也加（向下相容；如其他 caller 用 PATCH）
@@ -1099,6 +1128,35 @@ async def delete_ecsu_circuit(
 
 
 # ========== M-PM-217 Phase C：聚合查詢（2 endpoints）==========
+
+
+@router.get("/ecsu/realtime-summary")
+async def ecsu_realtime_summary(db: AsyncSession = Depends(get_db)):
+    """全量即時總表（老王 2026-07-24：ECSU Excel 匯出第 39 筆起空白案）。
+
+    匯出用一次撈全：逐顆複用既有 ecsu_realtime / ecsu_monthly（口徑 100% 一致、
+    共用 5s TTL cache），僅回摘要欄。93 顆內網逐顆 ~2-4 秒，匯出場景可接受。
+    ⚠️ 本 route 必須定義在 /ecsu/{ecsu_id}/... 之前（否則 'realtime-summary' 被當 ecsu_id 吃掉 422）。
+    """
+    ids = (await db.execute(
+        select(FndEcsu.ecsu_id).order_by(FndEcsu.ecsu_id)
+    )).scalars().all()
+    items = []
+    for eid in ids:
+        try:
+            rt = await ecsu_realtime(eid, db)
+            mo = await ecsu_monthly(eid, db)
+        except HTTPException:
+            continue
+        items.append({
+            "ecsu_id": eid,
+            "realtime_kw": rt["realtime_kw"],
+            "voltage_max": rt["voltage_max"],
+            "active_bindings": rt["active_bindings"],
+            "total_bindings": rt["total_bindings"],
+            "monthly_kwh": mo["monthly_kwh"],
+        })
+    return {"items": items, "count": len(items)}
 
 
 @router.get("/ecsu/{ecsu_id}/realtime")
